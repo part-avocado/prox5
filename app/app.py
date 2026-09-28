@@ -460,7 +460,7 @@ def review_blocks(cid: int, text: str):
     preview = defuse_broadcasts_text(text)
     return [
         {"type": "section",
-         "text": {"type": "mrkdwn", "text": f"*New submission* (queue #{cid})\n{quote(preview)}"}},
+         "text": {"type": "mrkdwn", "text": f"*New submission* (queue No. {cid})\n{quote(preview)}"}},
         {
             "type": "actions",
             "elements": [
@@ -509,16 +509,16 @@ def on_approve(ack, body, client):
     if not ALLOW_BROADCASTS_FROM_OP:
         text = defuse_broadcasts_text(text)
 
-    post = client.chat_postMessage(channel=CONFESSIONS, text=f"#{number}\n{text}")
+    post = client.chat_postMessage(channel=CONFESSIONS, text=f"No. {number}\n{text}")
     run("UPDATE confessions SET pub_ts=? WHERE id=?", (post["ts"], cid))
     run("INSERT OR IGNORE INTO relays (confession_id, pub_ts, dm_ts) VALUES (?,?,?)",
         (cid, post["ts"], c["dm_ts"]))
 
-    close_review(client, body, f":white_check_mark: Approved by <@{body['user']['id']}>. Posted as Confession #{number}")
+    close_review(client, body, f":white_check_mark: Approved by <@{body['user']['id']}>. Posted as Confession No. {number}")
     client.chat_postMessage(
         channel=dec(c["dm_channel_enc"]),
         thread_ts=c["dm_ts"],
-        text=f":tada: Approved and posted as *Confession #{number}*. Replies from the channel will appear "
+        text=f":tada: Approved and posted as *Confession No. {number}*. Replies from the channel will appear "
              f"in this thread, and anything you send here is posted there as {OP_NAME}. "
              f"Send */prox5-unsub* any time to stop channel replies from appearing here.",
     )
@@ -562,10 +562,10 @@ def on_reject_report(ack, body, client):
     client.chat_postMessage(
         channel=body["channel"]["id"],
         thread_ts=body["message"]["ts"],
-        text=f":rotating_light: Report for queue #{cid}. Author: <@{author}>. Copy this into Shroud:",
+        text=f":rotating_light: Report for queue No. {cid}. Author: <@{author}>. Copy this into Shroud:",
         blocks=[
             {"type": "section", "text": {"type": "mrkdwn",
-             "text": f":rotating_light: *Report for queue #{cid}.* Author: <@{author}>\nCopy this into Shroud:"}},
+             "text": f":rotating_light: *Report for queue No. {cid}.* Author: <@{author}>\nCopy this into Shroud:"}},
             {"type": "section", "text": {"type": "mrkdwn", "text": f"```{report}```"}},
         ],
     )
