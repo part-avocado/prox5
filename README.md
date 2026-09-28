@@ -1,40 +1,15 @@
 # prox5
-It's a confession bot!
+Confession bot!
 
-## Setup
+## Setup, Docker
+Use [Docker](https://www.docker.com/) to setup. 
 
-Run the interactive setup wizard to configure your Slack tokens, channel IDs,
-and encryption key:
-
-```
-python setup.py
-```
-
-This writes a `.env` file at the repo root. Then either:
-
-```
-pip install -r app/requirements.txt && python app/app.py
-```
-
-or, with Docker:
-
-```
-docker build -t prox5 . && docker run --env-file .env prox5
-```
-
-### Docker, configured interactively
-
-You don't need to run `setup.py` yourself first. If the container starts
-without its required config, it runs the same wizard for you:
-
+Run: 
 ```
 docker build -t prox5 .
 docker run -it --rm prox5
 ```
-
-To keep those answers across container restarts/recreation, bind-mount an
-`.env` file (create it empty first so Docker doesn't mount a directory
-there instead):
+then, 
 
 ```
 touch .env
