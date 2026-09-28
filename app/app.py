@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import json
 import os
+import random
 import re
 import sqlite3
 import threading
@@ -76,9 +77,9 @@ db.executescript(
         dm_ts           TEXT NOT NULL,     -- the author's original DM (thread root)
         text_enc        TEXT NOT NULL,     -- encrypted confession text
         status          TEXT NOT NULL DEFAULT 'draft',  -- draft|pending|approved|rejected
-        number          INTEGER,           -- public number, approved only
+        number          INTEGER,           -- assigned once staged for review; reused as the public post number if approved
         pub_ts          TEXT,              -- the post in #confessions (thread root)
-        subscribed      INTEGER NOT NULL DEFAULT 1  -- 0 if the OP opted out of channel replies via /prox5-unsub
+        subscribed      INTEGER NOT NULL DEFAULT 1  -- 0 if the OP opted out of channel replies via `unsub`
     );
     CREATE INDEX IF NOT EXISTS idx_conf_dm  ON confessions(dm_index, dm_ts);
     CREATE INDEX IF NOT EXISTS idx_conf_pub ON confessions(pub_ts);
@@ -337,20 +338,25 @@ def handle_pub(event, client):
         relay_new(event, c, "pub", client)
 
 
-_SUBSCRIPTION_COMMANDS = ("/prox5-unsub", "/prox5-sub")
+# Slack intercepts any message starting with "/" client-side as an attempted slash
+# command, and since these aren't registered slash commands it refuses to send them
+# at all -- so the trigger words can't start with a slash. `.lstrip("/")` below is a
+# defensive extra in case one ever slips through (e.g. Slack's own "escape with a
+# leading space" workaround).
+_UNSUB_WORDS = ("unsub", "unsubscribe")
+_SUB_WORDS = ("sub", "subscribe")
 
 
-def handle_subscription_command(client, dm_channel, thread_ts, c, cmd):
-    want = cmd == "/prox5-sub"
+def handle_subscription_command(client, dm_channel, thread_ts, c, want: bool):
     if bool(c["subscribed"]) == want:
         msg = ("You're already subscribed to updates on this confession." if want else
                "You're already unsubscribed from updates on this confession. "
-               "Send */prox5-sub* any time to turn them back on.")
+               "Send `sub` any time to turn them back on.")
     else:
         run("UPDATE confessions SET subscribed=? WHERE id=?", (1 if want else 0, c["id"]))
-        msg = ("You're subscribed again. Replies from the channel will show up in this thread." if want else
+        msg = ("You're subscribed again! Replies from the channel will show up in this thread." if want else
                "You're unsubscribed. Replies from the channel won't be sent here anymore. "
-               "Send */prox5-sub* any time to turn them back on. You can still reply here and it'll post to the channel.")
+               "Send `sub` any time to turn them back on. You can still reply here and it'll post to the channel.")
     client.chat_postMessage(channel=dm_channel, thread_ts=thread_ts, text=msg)
 
 
@@ -359,11 +365,11 @@ def handle_dm(event, client):
     thread_ts = event.get("thread_ts")
     if thread_ts and thread_ts != event["ts"]:
         c = conf_by_dm_root(dm_channel, thread_ts)
-        cmd = (event.get("text") or "").strip().lower()
+        cmd = (event.get("text") or "").strip().lower().lstrip("/")
         if not c:
             msg = "Hmm... I couldn't match this thread. Send a new message (not in a thread) to start one!"
-        elif cmd in _SUBSCRIPTION_COMMANDS:
-            handle_subscription_command(client, dm_channel, thread_ts, c, cmd)
+        elif cmd in _UNSUB_WORDS or cmd in _SUB_WORDS:
+            handle_subscription_command(client, dm_channel, thread_ts, c, cmd in _SUB_WORDS)
             return
         elif c["status"] == "approved" and c["pub_ts"]:
             relay_new(event, c, "dm", client)
@@ -434,6 +440,14 @@ def replace_prompt(client, body, text):
     )
 
 
+_STAGE_MESSAGES = (
+    ":incoming_envelope: Sent off to review! In the meantime, drink some tea?",
+    ":incoming_envelope: Off it goes! Maybe stretch your legs while the mods take a look?",
+    ":incoming_envelope: Sent to the mods. Go pet a dog or something.",
+    ":incoming_envelope: In the queue! Breathe. You did it.",
+)
+
+
 @app.action("stage")
 def on_stage(ack, body, client):
     ack()
@@ -441,10 +455,14 @@ def on_stage(ack, body, client):
     c = conf(cid)
     if not owns(body, c) or not transition(cid, "draft", "pending"):
         return
-    c = conf(cid)  # re-read in case the draft was edited
+    with _lock:
+        number = db.execute("SELECT COALESCE(MAX(number), 0) + 1 FROM confessions").fetchone()[0]
+        db.execute("UPDATE confessions SET number=? WHERE id=?", (number, cid))
+        db.commit()
+    c = conf(cid)  # re-read in case the draft was edited, and to pick up the number
     text = dec(c["text_enc"])
-    client.chat_postMessage(channel=REVIEW, text="New confession to review", blocks=review_blocks(cid, text))
-    replace_prompt(client, body, ":incoming_envelope: Sent off to review! In the meantime, drink some tea?")
+    client.chat_postMessage(channel=REVIEW, text="New confession to review", blocks=review_blocks(cid, c["number"], text))
+    replace_prompt(client, body, random.choice(_STAGE_MESSAGES))
 
 
 @app.action("cancel")
@@ -457,11 +475,11 @@ def on_cancel(ack, body, client):
     if run("DELETE FROM confessions WHERE id=? AND status='draft'", (cid,)) == 1:
         replace_prompt(client, body, ":wastebasket: Cancelled :(")
 
-def review_blocks(cid: int, text: str):
+def review_blocks(cid: int, number: int, text: str):
     preview = defuse_broadcasts_text(text)
     return [
         {"type": "section",
-         "text": {"type": "mrkdwn", "text": f"*New submission* (queue No. {cid})\n{quote(preview)}"}},
+         "text": {"type": "mrkdwn", "text": f"*New submission* *[{number}]*\n{quote(preview)}"}},
         {
             "type": "actions",
             "elements": [
@@ -483,14 +501,13 @@ def review_blocks(cid: int, text: str):
     ]
 
 
-def close_review(client, channel, ts, first_block, outcome: str):
-    client.chat_update(
-        channel=channel,
-        ts=ts,
-        text=outcome,
-        blocks=[first_block,
-                {"type": "context", "elements": [{"type": "mrkdwn", "text": outcome}]}],
-    )
+def close_review(client, channel, ts, first_block, outcome: str, reason: str = ""):
+    blocks = [first_block, {"type": "section", "text": {"type": "mrkdwn", "text": outcome}}]
+    fallback = outcome
+    if reason:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": quote(reason)}})
+        fallback += f"\n{quote(reason)}"
+    client.chat_update(channel=channel, ts=ts, text=fallback, blocks=blocks)
 
 
 @app.action("approve")
@@ -500,41 +517,33 @@ def on_approve(ack, body, client):
     if not transition(cid, "pending", "approved"):
         return
 
-    with _lock:
-        number = db.execute("SELECT COALESCE(MAX(number), 0) + 1 FROM confessions").fetchone()[0]
-        db.execute("UPDATE confessions SET number=? WHERE id=?", (number, cid))
-        db.commit()
-
     c = conf(cid)
+    number = c["number"]
     text = dec(c["text_enc"])
     if not ALLOW_BROADCASTS_FROM_OP:
         text = defuse_broadcasts_text(text)
 
-    post = client.chat_postMessage(channel=CONFESSIONS, text=f"No. {number}\n{text}")
+    post = client.chat_postMessage(channel=CONFESSIONS, text=f"*[{number}]*\n{text}")
     run("UPDATE confessions SET pub_ts=? WHERE id=?", (post["ts"], cid))
     run("INSERT OR IGNORE INTO relays (confession_id, pub_ts, dm_ts) VALUES (?,?,?)",
         (cid, post["ts"], c["dm_ts"]))
 
     close_review(client, body["channel"]["id"], body["message"]["ts"], body["message"]["blocks"][0],
-                 f":white_check_mark: Approved by <@{body['user']['id']}>. Posted as prox5 submit No. {number}")
+                 f":white_check_mark: Approved by <@{body['user']['id']}>. Posted as *[{number}]*")
     client.chat_postMessage(
         channel=dec(c["dm_channel_enc"]),
         thread_ts=c["dm_ts"],
-        text=f":tada: Approved and posted as *prox5 submit No. {number}*. Replies from the channel will appear "
+        text=f":tada: Approved and posted as *[{number}]*! Replies from the channel will appear "
              f"in this thread, and anything you send here is posted there as {OP_NAME}. "
-             f"Send */prox5-unsub* any time to stop channel replies from appearing here.",
+             f"Send `unsub` any time to stop channel replies from appearing here.",
     )
 
 
 def notify_rejected(client, c, reason: str = ""):
-    text = "Your confession wasn't approved by the moderators."
+    text = "Your confession wasn't approved by the moderators. :("
     if reason:
-        text += f"\nReason: {reason}"
-    client.chat_postMessage(
-        channel=dec(c["dm_channel_enc"]),
-        thread_ts=c["dm_ts"],
-        text="Your confession wasn't approved by the moderators. :(",
-    )
+        text += f"\n{quote(reason)}"
+    client.chat_postMessage(channel=dec(c["dm_channel_enc"]), thread_ts=c["dm_ts"], text=text)
 
 
 def reject_modal(cid: int, report: bool, channel: str, ts: str):
@@ -599,7 +608,7 @@ def on_reject_submit(ack, body, client):
         return
     c = conf(cid)
     mod = body["user"]["id"]
-    first_block = review_blocks(cid, dec(c["text_enc"]))[0]
+    first_block = review_blocks(cid, c["number"], dec(c["text_enc"]))[0]
 
     if report:
         author = dec(c["user_enc"])
@@ -614,20 +623,18 @@ def on_reject_submit(ack, body, client):
         client.chat_postMessage(
             channel=channel,
             thread_ts=ts,
-            text=f":rotating_light: Report for queue No. {cid}. Author: <@{author}>. Copy to Shroud:",
+            text=f":rotating_light: Report for *[{c['number']}]*. Author: <@{author}>. Copy to Shroud:",
             blocks=[
                 {"type": "section", "text": {"type": "mrkdwn",
-                 "text": f":rotating_light: *Report for queue No. {cid}.* Author: <@{author}>\nCopy to Shroud:"}},
+                 "text": f":rotating_light: *Report for [{c['number']}].* Author: <@{author}>\nCopy to Shroud:"}},
                 {"type": "section", "text": {"type": "mrkdwn", "text": f"```{report_text}```"}},
             ],
         )
         outcome = f":rotating_light: Rejected & reported by <@{mod}>. Report details posted in thread."
     else:
         outcome = f":x: Rejected by <@{mod}>"
-        if reason:
-            outcome += f"\n> {reason}"
 
-    close_review(client, channel, ts, first_block, outcome)
+    close_review(client, channel, ts, first_block, outcome, reason)
     notify_rejected(client, c, reason)
 
 
