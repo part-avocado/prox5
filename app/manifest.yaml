@@ -1,0 +1,35 @@
+display_information:
+  name: prox5
+  description: wowie its a confessions bot
+features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: prox5
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - chat:write.customize
+      - im:history
+      - channels:history
+      - groups:history
+      - reactions:read
+      - reactions:write
+      - users:read
+      - files:read
+      - files:write
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.im
+      - message.channels
+      - message.groups
+      - reaction_added
+      - reaction_removed
+  interactivity:
+    is_enabled: true
+  socket_mode_enabled: true
