@@ -3,7 +3,8 @@ Confession bot!
 
 ## Setup, Docker
 
-### 1. Create the Slack app first
+
+A. Create the Slack app first
 
 The bot needs a Slack app configured with socket mode.
 1. Go to https://api.slack.com/apps → Create New App → From an app manifest.
@@ -15,8 +16,10 @@ The bot needs a Slack app configured with socket mode.
   - Invite the bot to both channels.
 
 4. Build the image
+```
 docker build -t prox5 .
-5. Configure and run
+```
+6. Configure and run
 
 Interactive Setup:
 ```
