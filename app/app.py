@@ -10,7 +10,7 @@ Env vars
 Run `python setup.py` for an interactive wizard that fills these in for you.
 """
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 import hashlib
 import hmac
@@ -31,9 +31,9 @@ from slack_sdk.errors import SlackApiError
 load_dotenv()
 
 BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-CONFESSIONS = os.environ["CONFESSIONS_CHANNEL_ID"]
-REVIEW = os.environ["REVIEW_CHANNEL_ID"]
-ALLOW_BROADCASTS_FROM_OP = os.environ.get("ALLOW_BROADCASTS_FROM_OP") == "1"
+CONFESSIONS = "C0C5UDLBQQ0"
+REVIEW = "C0C4JMMU34P"
+ALLOW_BROADCASTS_FROM_OP = "0"
 
 MAX_LEN = 2500 
 OP_NAME = "Anonymouse"
