@@ -6,6 +6,7 @@ Env vars
   REVIEW_CHANNEL_ID         private moderator channel
   CONFESSIONS_KEY           Fernet key (see README / setup notes)
   ALLOW_BROADCASTS_FROM_OP  optional, "1" lets the confessor use @channel/@here/@everyone
+  DB_PATH                   optional, path to the sqlite database (default: data/confessions.db)
 
 Run `python setup.py` for an interactive wizard that fills these in for you.
 """
@@ -58,7 +59,9 @@ def dec(s: str) -> str:
 def dm_index(dm_channel: str) -> str:
     return hmac.new(_INDEX_KEY, dm_channel.encode(), hashlib.sha256).hexdigest()
 
-db = sqlite3.connect("confessions.db", check_same_thread=False)
+DB_PATH = os.environ.get("DB_PATH", "data/confessions.db")
+os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+db = sqlite3.connect(DB_PATH, check_same_thread=False)
 db.row_factory = sqlite3.Row
 _lock = threading.Lock()
 
