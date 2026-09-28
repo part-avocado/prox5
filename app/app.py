@@ -36,7 +36,7 @@ REVIEW = "C0C4JMMU34P"
 ALLOW_BROADCASTS_FROM_OP = "0"
 
 MAX_LEN = 2500 
-OP_NAME = "Anonymouse"
+OP_NAME = "prox5"
 OP_ICON = ":anonymous_lachlan:"
 
 app = App(token=BOT_TOKEN)
@@ -73,7 +73,8 @@ db.executescript(
         text_enc        TEXT NOT NULL,     -- encrypted confession text
         status          TEXT NOT NULL DEFAULT 'draft',  -- draft|pending|approved|rejected
         number          INTEGER,           -- public number, approved only
-        pub_ts          TEXT               -- the post in #confessions (thread root)
+        pub_ts          TEXT,              -- the post in #confessions (thread root)
+        subscribed      INTEGER NOT NULL DEFAULT 1  -- 0 if the OP opted out of channel replies via /unsubscribe
     );
     CREATE INDEX IF NOT EXISTS idx_conf_dm  ON confessions(dm_index, dm_ts);
     CREATE INDEX IF NOT EXISTS idx_conf_pub ON confessions(pub_ts);
@@ -89,6 +90,11 @@ db.executescript(
     """
 )
 db.commit()
+
+_conf_cols = [r[1] for r in db.execute("PRAGMA table_info(confessions)").fetchall()]
+if "subscribed" not in _conf_cols:
+    db.execute("ALTER TABLE confessions ADD COLUMN subscribed INTEGER NOT NULL DEFAULT 1")
+    db.commit()
 
 
 def q(sql, params=()):
@@ -323,8 +329,25 @@ def handle_pub(event, client):
     if not thread_ts or thread_ts == event["ts"]:
         return
     c = conf_by_pub_root(thread_ts)
-    if c:
+    if c and c["subscribed"]:
         relay_new(event, c, "pub", client)
+
+
+_SUBSCRIPTION_COMMANDS = ("/unsubscribe", "/subscribe")
+
+
+def handle_subscription_command(client, dm_channel, thread_ts, c, cmd):
+    want = cmd == "/subscribe"
+    if bool(c["subscribed"]) == want:
+        msg = ("You're already subscribed to updates on this confession." if want else
+               "You're already unsubscribed from updates on this confession. "
+               "Send */subscribe* any time to turn them back on.")
+    else:
+        run("UPDATE confessions SET subscribed=? WHERE id=?", (1 if want else 0, c["id"]))
+        msg = ("You're subscribed again. Replies from the channel will show up in this thread." if want else
+               "You're unsubscribed. Replies from the channel won't be sent here anymore. "
+               "Send */subscribe* any time to turn them back on. You can still reply here and it'll post to the channel.")
+    client.chat_postMessage(channel=dm_channel, thread_ts=thread_ts, text=msg)
 
 
 def handle_dm(event, client):
@@ -332,8 +355,12 @@ def handle_dm(event, client):
     thread_ts = event.get("thread_ts")
     if thread_ts and thread_ts != event["ts"]:
         c = conf_by_dm_root(dm_channel, thread_ts)
+        cmd = (event.get("text") or "").strip().lower()
         if not c:
             msg = "I couldn't match this thread to a confession. Send a new message (not in a thread) to start one."
+        elif cmd in _SUBSCRIPTION_COMMANDS:
+            handle_subscription_command(client, dm_channel, thread_ts, c, cmd)
+            return
         elif c["status"] == "approved" and c["pub_ts"]:
             relay_new(event, c, "dm", client)
             return
@@ -479,7 +506,7 @@ def on_approve(ack, body, client):
     if not ALLOW_BROADCASTS_FROM_OP:
         text = defuse_broadcasts_text(text)
 
-    post = client.chat_postMessage(channel=CONFESSIONS, text=f"[ Confession: {number} ]\n{text}")
+    post = client.chat_postMessage(channel=CONFESSIONS, text=f"#{number}\n{text}")
     run("UPDATE confessions SET pub_ts=? WHERE id=?", (post["ts"], cid))
     run("INSERT OR IGNORE INTO relays (confession_id, pub_ts, dm_ts) VALUES (?,?,?)",
         (cid, post["ts"], c["dm_ts"]))
@@ -489,7 +516,8 @@ def on_approve(ack, body, client):
         channel=dec(c["dm_channel_enc"]),
         thread_ts=c["dm_ts"],
         text=f":tada: Approved and posted as *Confession #{number}*. Replies from the channel will appear "
-             f"in this thread, and anything you send here is posted there as {OP_NAME}.",
+             f"in this thread, and anything you send here is posted there as {OP_NAME}. "
+             f"Send */unsubscribe* any time to stop channel replies from appearing here.",
     )
 
 
