@@ -15,6 +15,7 @@ VERSION = "1.0.7"
 
 import hashlib
 import hmac
+import json
 import os
 import re
 import sqlite3
@@ -482,12 +483,12 @@ def review_blocks(cid: int, text: str):
     ]
 
 
-def close_review(client, body, outcome: str):
+def close_review(client, channel, ts, first_block, outcome: str):
     client.chat_update(
-        channel=body["channel"]["id"],
-        ts=body["message"]["ts"],
+        channel=channel,
+        ts=ts,
         text=outcome,
-        blocks=[body["message"]["blocks"][0],
+        blocks=[first_block,
                 {"type": "context", "elements": [{"type": "mrkdwn", "text": outcome}]}],
     )
 
@@ -514,7 +515,8 @@ def on_approve(ack, body, client):
     run("INSERT OR IGNORE INTO relays (confession_id, pub_ts, dm_ts) VALUES (?,?,?)",
         (cid, post["ts"], c["dm_ts"]))
 
-    close_review(client, body, f":white_check_mark: Approved by <@{body['user']['id']}>. Posted as Confession No. {number}")
+    close_review(client, body["channel"]["id"], body["message"]["ts"], body["message"]["blocks"][0],
+                 f":white_check_mark: Approved by <@{body['user']['id']}>. Posted as Confession No. {number}")
     client.chat_postMessage(
         channel=dec(c["dm_channel_enc"]),
         thread_ts=c["dm_ts"],
@@ -524,53 +526,109 @@ def on_approve(ack, body, client):
     )
 
 
-def notify_rejected(client, c):
+def notify_rejected(client, c, reason: str = ""):
+    text = "Your confession wasn't approved by the moderators."
+    if reason:
+        text += f"\nReason: {reason}"
     client.chat_postMessage(
         channel=dec(c["dm_channel_enc"]),
         thread_ts=c["dm_ts"],
-        text="Your confession wasn't approved by the moderators.",
+        text=text,
     )
+
+
+def reject_modal(cid: int, report: bool, channel: str, ts: str):
+    blocks = []
+    if report:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": ":warning: This reveals the author's Slack ID in the review "
+                                                "thread so a moderator can file a report in Shroud."},
+        })
+    blocks.append({
+        "type": "input",
+        "block_id": "reason_block",
+        "optional": True,
+        "label": {"type": "plain_text", "text": "Reason (optional)"},
+        "element": {
+            "type": "plain_text_input",
+            "action_id": "reason",
+            "multiline": True,
+            "placeholder": {"type": "plain_text", "text": "Shown to the author. Leave blank to send no reason."},
+        },
+    })
+    return {
+        "type": "modal",
+        "callback_id": "reject_submit",
+        "private_metadata": json.dumps({"cid": cid, "report": report, "channel": channel, "ts": ts}),
+        "title": {"type": "plain_text", "text": "Reject & report" if report else "Reject confession"},
+        "submit": {"type": "plain_text", "text": "Report" if report else "Reject"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": blocks,
+    }
 
 
 @app.action("reject")
 def on_reject(ack, body, client):
     ack()
     cid = int(body["actions"][0]["value"])
-    if not transition(cid, "pending", "rejected"):
-        return
-    close_review(client, body, f":x: Rejected by <@{body['user']['id']}>")
-    notify_rejected(client, conf(cid))
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view=reject_modal(cid, False, body["channel"]["id"], body["message"]["ts"]),
+    )
 
 
 @app.action("reject_report")
 def on_reject_report(ack, body, client):
     ack()
     cid = int(body["actions"][0]["value"])
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view=reject_modal(cid, True, body["channel"]["id"], body["message"]["ts"]),
+    )
+
+
+@app.view("reject_submit")
+def on_reject_submit(ack, body, client):
+    ack()
+    meta = json.loads(body["view"]["private_metadata"])
+    cid, report, channel, ts = meta["cid"], meta["report"], meta["channel"], meta["ts"]
+    reason = (body["view"]["state"]["values"]["reason_block"]["reason"].get("value") or "").strip()
+
     if not transition(cid, "pending", "rejected"):
         return
     c = conf(cid)
     mod = body["user"]["id"]
-    author = dec(c["user_enc"])
-    content = dec(c["text_enc"]).replace("```", "'''")
+    first_block = review_blocks(cid, dec(c["text_enc"]))[0]
 
-    report = (
-        f"Author Slack ID: {author}\n"
-        f"Time sent: {sent_time(c['dm_ts'])}\n"
-        f"Reported by: {mod}\n"
-        f"Message:\n{content}"
-    )
-    client.chat_postMessage(
-        channel=body["channel"]["id"],
-        thread_ts=body["message"]["ts"],
-        text=f":rotating_light: Report for queue No. {cid}. Author: <@{author}>. Copy this into Shroud:",
-        blocks=[
-            {"type": "section", "text": {"type": "mrkdwn",
-             "text": f":rotating_light: *Report for queue No. {cid}.* Author: <@{author}>\nCopy this into Shroud:"}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"```{report}```"}},
-        ],
-    )
-    close_review(client, body, f":rotating_light: Rejected & reported by <@{mod}>. Report details posted in thread.")
-    notify_rejected(client, c)
+    if report:
+        author = dec(c["user_enc"])
+        content = dec(c["text_enc"]).replace("```", "'''")
+        report_text = (
+            f"Author Slack ID: {author}\n"
+            f"Time sent: {sent_time(c['dm_ts'])}\n"
+            f"Reported by: {mod}\n"
+            + (f"Reason: {reason}\n" if reason else "")
+            + f"Message:\n{content}"
+        )
+        client.chat_postMessage(
+            channel=channel,
+            thread_ts=ts,
+            text=f":rotating_light: Report for queue No. {cid}. Author: <@{author}>. Copy this into Shroud:",
+            blocks=[
+                {"type": "section", "text": {"type": "mrkdwn",
+                 "text": f":rotating_light: *Report for queue No. {cid}.* Author: <@{author}>\nCopy this into Shroud:"}},
+                {"type": "section", "text": {"type": "mrkdwn", "text": f"```{report_text}```"}},
+            ],
+        )
+        outcome = f":rotating_light: Rejected & reported by <@{mod}>. Report details posted in thread."
+    else:
+        outcome = f":x: Rejected by <@{mod}>"
+        if reason:
+            outcome += f"\n> {reason}"
+
+    close_review(client, channel, ts, first_block, outcome)
+    notify_rejected(client, c, reason)
 
 
 def someone_else_reacted(client, channel, ts, emoji) -> bool:
