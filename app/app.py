@@ -2,8 +2,6 @@
 Env vars
   SLACK_BOT_TOKEN           xoxb-...
   SLACK_APP_TOKEN           xapp-... (app-level token, connections:write)
-  CONFESSIONS_CHANNEL_ID    channel where approved confessions are posted
-  REVIEW_CHANNEL_ID         private moderator channel
   CONFESSIONS_KEY           Fernet key (see README / setup notes)
   ALLOW_BROADCASTS_FROM_OP  optional, "1" lets the confessor use @channel/@here/@everyone
 """
@@ -26,8 +24,8 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk.errors import SlackApiError
 
 BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-CONFESSIONS = os.environ["CONFESSIONS_CHANNEL_ID"]
-REVIEW = os.environ["REVIEW_CHANNEL_ID"]
+CONFESSIONS = C0C5UDLBQQ0
+REVIEW = C0C4JMMU34P
 ALLOW_BROADCASTS_FROM_OP = os.environ.get("ALLOW_BROADCASTS_FROM_OP") == "1"
 
 MAX_LEN = 2500 
