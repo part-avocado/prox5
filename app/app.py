@@ -360,6 +360,44 @@ def handle_subscription_command(client, dm_channel, thread_ts, c, want: bool):
     client.chat_postMessage(channel=dm_channel, thread_ts=thread_ts, text=msg)
 
 
+def most_recent_conf(dm_channel):
+    return q1(
+        "SELECT * FROM confessions WHERE dm_index=? ORDER BY id DESC LIMIT 1",
+        (dm_index(dm_channel),),
+    )
+
+
+# /sprox and /uprox are registered Slack slash commands, which Slack only ever
+# delivers from the top level of a DM -- never from inside a thread reply (this
+# is a hard platform restriction, not something we can configure around). So
+# unlike the in-thread `sub`/`unsub` text triggers above, these act on the
+# user's most recently submitted confession rather than a specific thread.
+def handle_slash_subscription(ack, command, client, want: bool):
+    ack()
+    dm_channel = command["channel_id"]
+    if command.get("channel_name") != "directmessage":
+        client.chat_postEphemeral(
+            channel=dm_channel, user=command["user_id"],
+            text="Please use this command in your DM with prox5, not in a channel.",
+        )
+        return
+    c = most_recent_conf(dm_channel)
+    if not c:
+        client.chat_postMessage(channel=dm_channel, text="You haven't submitted a prox5 submission yet.")
+        return
+    handle_subscription_command(client, dm_channel, c["dm_ts"], c, want)
+
+
+@app.command("/sprox")
+def cmd_sprox(ack, command, client):
+    handle_slash_subscription(ack, command, client, True)
+
+
+@app.command("/uprox")
+def cmd_uprox(ack, command, client):
+    handle_slash_subscription(ack, command, client, False)
+
+
 def handle_dm(event, client):
     dm_channel = event["channel"]
     thread_ts = event.get("thread_ts")
