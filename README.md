@@ -1,5 +1,5 @@
 # prox5
-Confession bot!
+prox5 submit bot!
 
 ## Setup, Docker
 0. Download. Run `docker pull ghcr.io/part-avocado/prox5:latest`
@@ -12,7 +12,7 @@ The bot needs a Slack app configured with socket mode.
 3. After creation:
   - Install the app to your workspace -> copy the Bot User OAuth Token (xoxb-...) -> this is SLACK_BOT_TOKEN.
   - Under Basic Information -> App-Level Tokens, generate a token with the connections:write scope (xapp-...) → this is SLACK_APP_TOKEN.
-  - Create/pick two channels: one for approved confessions, one private for moderators. Grab their channel IDs (right-click channel → View channel details → copy ID at the bottom) → CONFESSIONS_CHANNEL_ID and REVIEW_CHANNEL_ID.
+  - Create/pick two channels: one for approved prox5 submissions, one private for moderators. Grab their channel IDs (right-click channel → View channel details → copy ID at the bottom) → CONFESSIONS_CHANNEL_ID and REVIEW_CHANNEL_ID.
   - Invite the bot to both channels.
 
 4. Build the image
@@ -45,4 +45,4 @@ docker run -d --name prox5 \
   prox5
 ```
 
-The `-v prox5-data:/app/data` volume is where the sqlite database (confession history, moderation state, and the confession counter) lives. Without it, that data — including the confession count — resets every time the container is recreated.
+The `-v prox5-data:/app/data` volume is where the sqlite database (prox5 submission history, moderation state, and the submission counter) lives. Without it, that data — including the submission count — resets every time the container is recreated.

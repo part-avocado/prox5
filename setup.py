@@ -34,8 +34,8 @@ FIELDS = [
     },
     {
         "key": "CONFESSIONS_CHANNEL_ID",
-        "prompt": "Confessions channel ID",
-        "hint": "where approved confessions get posted, e.g. C0123456789",
+        "prompt": "prox5 submit channel ID",
+        "hint": "where approved prox5 submissions get posted, e.g. C0123456789",
         "secret": False,
         "validate": lambda v: v.startswith("C"),
     },
@@ -128,12 +128,12 @@ def main():
     for field in FIELDS:
         values[field["key"]] = prompt_field(field, existing.get(field["key"]))
 
-    print("\nCONFESSIONS_KEY encrypts stored confessions/DM channel IDs at rest.")
+    print("\nCONFESSIONS_KEY encrypts stored prox5 submissions/DM channel IDs at rest.")
     if existing.get("CONFESSIONS_KEY") and prompt_yes_no("Keep the existing key?", default=True):
         values["CONFESSIONS_KEY"] = existing["CONFESSIONS_KEY"]
     elif prompt_yes_no("Generate a new key automatically?", default=True):
         values["CONFESSIONS_KEY"] = generate_fernet_key()
-        print("  Generated a new CONFESSIONS_KEY. Losing this key makes existing confessions unreadable.")
+        print("  Generated a new CONFESSIONS_KEY. Losing this key makes existing prox5 submissions unreadable.")
     else:
         while True:
             key = input("  Paste an existing Fernet key: ").strip()

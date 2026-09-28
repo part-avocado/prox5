@@ -1,6 +1,6 @@
 display_information:
   name: prox5
-  description: wowie its a confessions bot
+  description: wowie its a prox5 submit bot
 features:
   app_home:
     home_tab_enabled: false

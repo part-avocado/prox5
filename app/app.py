@@ -2,10 +2,10 @@
 Env vars
   SLACK_BOT_TOKEN           xoxb-...
   SLACK_APP_TOKEN           xapp-... (app-level token, connections:write)
-  CONFESSIONS_CHANNEL_ID    channel where approved confessions are posted
+  CONFESSIONS_CHANNEL_ID    channel where approved prox5 submissions are posted
   REVIEW_CHANNEL_ID         private moderator channel
   CONFESSIONS_KEY           Fernet key (see README / setup notes)
-  ALLOW_BROADCASTS_FROM_OP  optional, "1" lets the confessor use @channel/@here/@everyone
+  ALLOW_BROADCASTS_FROM_OP  optional, "1" lets the submitter use @channel/@here/@everyone
   DB_PATH                   optional, path to the sqlite database (default: data/confessions.db)
 
 Run `python setup.py` for an interactive wizard that fills these in for you.
@@ -349,8 +349,8 @@ _SUB_WORDS = ("sub", "subscribe")
 
 def handle_subscription_command(client, dm_channel, thread_ts, c, want: bool):
     if bool(c["subscribed"]) == want:
-        msg = ("You're already subscribed to updates on this confession." if want else
-               "You're already unsubscribed from updates on this confession. "
+        msg = ("You're already subscribed to updates on this prox5 submission." if want else
+               "You're already unsubscribed from updates on this prox5 submission. "
                "Send `sub` any time to turn them back on.")
     else:
         run("UPDATE confessions SET subscribed=? WHERE id=?", (1 if want else 0, c["id"]))
@@ -391,7 +391,7 @@ def handle_dm(event, client):
         return
     if len(text) > MAX_LEN:
         client.chat_postMessage(channel=dm_channel, thread_ts=event["ts"],
-                                text=f"Woah that's too long! Please keep confessions under {MAX_LEN} characters.")
+                                text=f"Woah that's too long! Please keep prox5 submissions under {MAX_LEN} characters.")
         return
 
     with _lock:
@@ -407,7 +407,7 @@ def handle_dm(event, client):
     client.chat_postMessage(
         channel=dm_channel,
         thread_ts=event["ts"],
-        text="Submit this as an anonymous confession?",
+        text="Submit this as an anonymous prox5 submission?",
         blocks=[
             {
                 "type": "section",
@@ -461,7 +461,7 @@ def on_stage(ack, body, client):
         db.commit()
     c = conf(cid)  # re-read in case the draft was edited, and to pick up the number
     text = dec(c["text_enc"])
-    client.chat_postMessage(channel=REVIEW, text="New confession to review", blocks=review_blocks(cid, c["number"], text))
+    client.chat_postMessage(channel=REVIEW, text="New prox5 submission to review", blocks=review_blocks(cid, c["number"], text))
     replace_prompt(client, body, random.choice(_STAGE_MESSAGES))
 
 
@@ -479,7 +479,7 @@ def review_blocks(cid: int, number: int, text: str):
     preview = defuse_broadcasts_text(text)
     return [
         {"type": "section",
-         "text": {"type": "mrkdwn", "text": f"*New submission* *[{number}]*\n{quote(preview)}"}},
+         "text": {"type": "mrkdwn", "text": f"*New submission* *[ {number} ]*\n{quote(preview)}"}},
         {
             "type": "actions",
             "elements": [
@@ -523,24 +523,25 @@ def on_approve(ack, body, client):
     if not ALLOW_BROADCASTS_FROM_OP:
         text = defuse_broadcasts_text(text)
 
-    post = client.chat_postMessage(channel=CONFESSIONS, text=f"*[{number}]*\n{text}")
+    post = client.chat_postMessage(channel=CONFESSIONS, text=f"*[ {number} ]*\n{text}",
+                                    username=OP_NAME, icon_emoji=OP_ICON)
     run("UPDATE confessions SET pub_ts=? WHERE id=?", (post["ts"], cid))
     run("INSERT OR IGNORE INTO relays (confession_id, pub_ts, dm_ts) VALUES (?,?,?)",
         (cid, post["ts"], c["dm_ts"]))
 
     close_review(client, body["channel"]["id"], body["message"]["ts"], body["message"]["blocks"][0],
-                 f":white_check_mark: Approved by <@{body['user']['id']}>. Posted as *[{number}]*")
+                 f":white_check_mark: Approved by <@{body['user']['id']}>. Posted as *[ {number} ]*")
     client.chat_postMessage(
         channel=dec(c["dm_channel_enc"]),
         thread_ts=c["dm_ts"],
-        text=f":tada: Approved and posted as *[{number}]*! Replies from the channel will appear "
+        text=f":tada: Approved and posted as *[ {number} ]*! Replies from the channel will appear "
              f"in this thread, and anything you send here is posted there as {OP_NAME}. "
              f"Send `unsub` any time to stop channel replies from appearing here.",
     )
 
 
 def notify_rejected(client, c, reason: str = ""):
-    text = "Your confession wasn't approved by the moderators. :("
+    text = "Your prox5 submission wasn't approved by the moderators. :("
     if reason:
         text += f"\n{quote(reason)}"
     client.chat_postMessage(channel=dec(c["dm_channel_enc"]), thread_ts=c["dm_ts"], text=text)
@@ -570,7 +571,7 @@ def reject_modal(cid: int, report: bool, channel: str, ts: str):
         "type": "modal",
         "callback_id": "reject_submit",
         "private_metadata": json.dumps({"cid": cid, "report": report, "channel": channel, "ts": ts}),
-        "title": {"type": "plain_text", "text": "Reject & report" if report else "Reject confession"},
+        "title": {"type": "plain_text", "text": "Reject & report" if report else "Reject prox5 submission"},
         "submit": {"type": "plain_text", "text": "Report" if report else "Reject"},
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": blocks,
@@ -623,10 +624,10 @@ def on_reject_submit(ack, body, client):
         client.chat_postMessage(
             channel=channel,
             thread_ts=ts,
-            text=f":rotating_light: Report for *[{c['number']}]*. Author: <@{author}>. Copy to Shroud:",
+            text=f":rotating_light: Report for *[ {c['number']} ]*. Author: <@{author}>. Copy to Shroud:",
             blocks=[
                 {"type": "section", "text": {"type": "mrkdwn",
-                 "text": f":rotating_light: *Report for [{c['number']}].* Author: <@{author}>\nCopy to Shroud:"}},
+                 "text": f":rotating_light: *Report for [ {c['number']} ].* Author: <@{author}>\nCopy to Shroud:"}},
                 {"type": "section", "text": {"type": "mrkdwn", "text": f"```{report_text}```"}},
             ],
         )
