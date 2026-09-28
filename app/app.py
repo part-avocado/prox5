@@ -473,7 +473,7 @@ def review_blocks(cid: int, text: str):
                  "confirm": {
                      "title": {"type": "plain_text", "text": "Reject and report?"},
                      "text": {"type": "plain_text",
-                              "text": "This reveals the author's Slack ID to you privately so you can file a report in Shroud."},
+                              "text": "This reveals the author's Slack ID in this thread so a moderator can file a report in Shroud."},
                      "confirm": {"type": "plain_text", "text": "Report"},
                      "deny": {"type": "plain_text", "text": "Cancel"},
                  }},
@@ -554,15 +554,14 @@ def on_reject_report(ack, body, client):
     content = dec(c["text_enc"]).replace("```", "'''")
 
     report = (
-        f"Confession report\n"
-        f"Queue ID: {cid}\n"
         f"Author Slack ID: {author}\n"
         f"Time sent: {sent_time(c['dm_ts'])}\n"
         f"Reported by: {mod}\n"
         f"Message:\n{content}"
     )
     client.chat_postMessage(
-        channel=mod,
+        channel=body["channel"]["id"],
+        thread_ts=body["message"]["ts"],
         text=f":rotating_light: Report for queue #{cid}. Author: <@{author}>. Copy this into Shroud:",
         blocks=[
             {"type": "section", "text": {"type": "mrkdwn",
@@ -570,7 +569,7 @@ def on_reject_report(ack, body, client):
             {"type": "section", "text": {"type": "mrkdwn", "text": f"```{report}```"}},
         ],
     )
-    close_review(client, body, f":rotating_light: Rejected & reported by <@{mod}>. Report details sent to them privately.")
+    close_review(client, body, f":rotating_light: Rejected & reported by <@{mod}>. Report details posted in thread.")
     notify_rejected(client, c)
 
 
