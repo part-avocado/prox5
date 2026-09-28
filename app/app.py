@@ -8,6 +8,8 @@ Env vars
   ALLOW_BROADCASTS_FROM_OP  optional, "1" lets the confessor use @channel/@here/@everyone
 """
 
+version = 1.0.0
+
 import hashlib
 import hmac
 import os
