@@ -2,7 +2,7 @@
 Confession bot!
 
 ## Setup, Docker
-
+0. Download. Run `docker pull ghcr.io/part-avocado/prox5:latest`
 
 A. Create the Slack app first
 
