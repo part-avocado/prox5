@@ -2,7 +2,12 @@
 Env vars
   SLACK_BOT_TOKEN           xoxb-...
   SLACK_APP_TOKEN           xapp-... (app-level token, connections:write)
+  CONFESSIONS_CHANNEL_ID    channel where approved confessions are posted
+  REVIEW_CHANNEL_ID         private moderator channel
   CONFESSIONS_KEY           Fernet key (see README / setup notes)
+  ALLOW_BROADCASTS_FROM_OP  optional, "1" lets the confessor use @channel/@here/@everyone
+
+Run `python setup.py` for an interactive wizard that fills these in for you.
 """
 
 VERSION = "1.0.3"
@@ -18,14 +23,17 @@ import urllib.request
 from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet
+from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk.errors import SlackApiError
 
+load_dotenv()
+
 BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-CONFESSIONS = C0C5UDLBQQ0
-REVIEW = C0C4JMMU34P
-ALLOW_BROADCASTS_FROM_OP = "0"
+CONFESSIONS = os.environ["CONFESSIONS_CHANNEL_ID"]
+REVIEW = os.environ["REVIEW_CHANNEL_ID"]
+ALLOW_BROADCASTS_FROM_OP = os.environ.get("ALLOW_BROADCASTS_FROM_OP") == "1"
 
 MAX_LEN = 2500 
 OP_NAME = "Anonymouse"
