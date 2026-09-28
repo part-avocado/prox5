@@ -361,7 +361,7 @@ def handle_dm(event, client):
         c = conf_by_dm_root(dm_channel, thread_ts)
         cmd = (event.get("text") or "").strip().lower()
         if not c:
-            msg = "I couldn't match this thread to a confession. Send a new message (not in a thread) to start one."
+            msg = "Hmm... I couldn't match this thread. Send a new message (not in a thread) to start one!"
         elif cmd in _SUBSCRIPTION_COMMANDS:
             handle_subscription_command(client, dm_channel, thread_ts, c, cmd)
             return
@@ -370,10 +370,10 @@ def handle_dm(event, client):
             return
         else:
             msg = {
-                "draft": "Use the *Stage* or *Cancel* buttons above first.",
-                "pending": "This confession is still being reviewed, so there's no thread to reply to yet.",
-                "rejected": "This confession wasn't approved, so replies can't be posted.",
-                "approved": "Hang on, this confession is still being posted. Try again in a moment.",
+                "draft": "Use the *Stage* or *Cancel* buttons above first!",
+                "pending": "This prox5 submission is still under review. Please try again later!",
+                "rejected": "This prox5 submission was not approved.",
+                "approved": "Please wait... We're trying to send your prox5 submission. Try again momentarily, or ping @partavocado on Slack.",
             }[c["status"]]
         client.chat_postMessage(channel=dm_channel, thread_ts=thread_ts, text=msg)
         return
@@ -381,11 +381,11 @@ def handle_dm(event, client):
     text = (event.get("text") or "").strip()
     if not text:
         client.chat_postMessage(channel=dm_channel, thread_ts=event["ts"],
-                                text="Confessions need some text. Attachments can't be submitted.")
+                                text="prox5 submissions need at least _some_ some text. Attachments can't be submitted alone.")
         return
     if len(text) > MAX_LEN:
         client.chat_postMessage(channel=dm_channel, thread_ts=event["ts"],
-                                text=f"That's too long. Please keep confessions under {MAX_LEN} characters.")
+                                text=f"Woah that's too long! Please keep confessions under {MAX_LEN} characters.")
         return
 
     with _lock:
@@ -407,8 +407,8 @@ def handle_dm(event, client):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "Submit the message above as an *anonymous confession*? "
-                            "Moderators review it before it's posted, and they won't see who you are." + note,
+                    "text": "Submit the message above? "
+                            "Moderators review it before it's posted, but they don't know who you are, unless you have been reported for anti-CoC material." + note,
                 },
             },
             {
@@ -444,7 +444,7 @@ def on_stage(ack, body, client):
     c = conf(cid)  # re-read in case the draft was edited
     text = dec(c["text_enc"])
     client.chat_postMessage(channel=REVIEW, text="New confession to review", blocks=review_blocks(cid, text))
-    replace_prompt(client, body, ":incoming_envelope: Sent to the moderators for review. I'll update you in this thread.")
+    replace_prompt(client, body, ":incoming_envelope: Sent off to review! In the meantime, drink some tea?")
 
 
 @app.action("cancel")
@@ -455,7 +455,7 @@ def on_cancel(ack, body, client):
     if not owns(body, c):
         return
     if run("DELETE FROM confessions WHERE id=? AND status='draft'", (cid,)) == 1:
-        replace_prompt(client, body, ":wastebasket: Cancelled. Nothing was sent or kept.")
+        replace_prompt(client, body, ":wastebasket: Cancelled :(")
 
 def review_blocks(cid: int, text: str):
     preview = defuse_broadcasts_text(text)
@@ -474,7 +474,7 @@ def review_blocks(cid: int, text: str):
                  "confirm": {
                      "title": {"type": "plain_text", "text": "Reject and report?"},
                      "text": {"type": "plain_text",
-                              "text": "This reveals the author's Slack ID in this thread so a moderator can file a report in Shroud."},
+                              "text": "This reveals the author's Slack ID to you privately so you can file a report."},
                      "confirm": {"type": "plain_text", "text": "Report"},
                      "deny": {"type": "plain_text", "text": "Cancel"},
                  }},
@@ -516,11 +516,11 @@ def on_approve(ack, body, client):
         (cid, post["ts"], c["dm_ts"]))
 
     close_review(client, body["channel"]["id"], body["message"]["ts"], body["message"]["blocks"][0],
-                 f":white_check_mark: Approved by <@{body['user']['id']}>. Posted as Confession No. {number}")
+                 f":white_check_mark: Approved by <@{body['user']['id']}>. Posted as prox5 submit No. {number}")
     client.chat_postMessage(
         channel=dec(c["dm_channel_enc"]),
         thread_ts=c["dm_ts"],
-        text=f":tada: Approved and posted as *Confession No. {number}*. Replies from the channel will appear "
+        text=f":tada: Approved and posted as *prox5 submit No. {number}*. Replies from the channel will appear "
              f"in this thread, and anything you send here is posted there as {OP_NAME}. "
              f"Send */prox5-unsub* any time to stop channel replies from appearing here.",
     )
@@ -533,7 +533,7 @@ def notify_rejected(client, c, reason: str = ""):
     client.chat_postMessage(
         channel=dec(c["dm_channel_enc"]),
         thread_ts=c["dm_ts"],
-        text=text,
+        text="Your confession wasn't approved by the moderators. :(",
     )
 
 
@@ -605,19 +605,19 @@ def on_reject_submit(ack, body, client):
         author = dec(c["user_enc"])
         content = dec(c["text_enc"]).replace("```", "'''")
         report_text = (
+            f"prox5 submission info\n"
             f"Author Slack ID: {author}\n"
             f"Time sent: {sent_time(c['dm_ts'])}\n"
-            f"Reported by: {mod}\n"
             + (f"Reason: {reason}\n" if reason else "")
             + f"Message:\n{content}"
         )
         client.chat_postMessage(
             channel=channel,
             thread_ts=ts,
-            text=f":rotating_light: Report for queue No. {cid}. Author: <@{author}>. Copy this into Shroud:",
+            text=f":rotating_light: Report for queue No. {cid}. Author: <@{author}>. Copy to Shroud:",
             blocks=[
                 {"type": "section", "text": {"type": "mrkdwn",
-                 "text": f":rotating_light: *Report for queue No. {cid}.* Author: <@{author}>\nCopy this into Shroud:"}},
+                 "text": f":rotating_light: *Report for queue No. {cid}.* Author: <@{author}>\nCopy to Shroud:"}},
                 {"type": "section", "text": {"type": "mrkdwn", "text": f"```{report_text}```"}},
             ],
         )
