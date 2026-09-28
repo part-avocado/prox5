@@ -23,8 +23,8 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk.errors import SlackApiError
 
 BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-CONFESSIONS = C0C5UDLBQQ0
-REVIEW = C0C4JMMU34P
+CONFESSIONS = "C0C5UDLBQQ0"
+REVIEW = "C0C4JMMU34P"
 ALLOW_BROADCASTS_FROM_OP = "0"
 
 MAX_LEN = 2500 
