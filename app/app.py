@@ -36,7 +36,7 @@ REVIEW = "C0C4JMMU34P"
 ALLOW_BROADCASTS_FROM_OP = "0"
 
 MAX_LEN = 2500 
-OP_NAME = "Anonymouse"
+OP_NAME = "prox5"
 OP_ICON = ":anonymous_lachlan:"
 
 app = App(token=BOT_TOKEN)
