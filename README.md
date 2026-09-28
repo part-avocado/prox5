@@ -29,7 +29,7 @@ docker run -it --rm -v $(pwd)/.env:/app/.env prox5
 
 Production Running 
 ```
-docker run -d --name prox5 --env-file .env prox5
+docker run -d --name prox5 --env-file .env -v prox5-data:/app/data prox5
 ```
 or with explicit -e flags:
 
@@ -41,5 +41,8 @@ docker run -d --name prox5 \
   -e REVIEW_CHANNEL_ID=C0123456789 \
   -e CONFESSIONS_KEY=<fernet-key> \
   -e ALLOW_BROADCASTS_FROM_OP=0 \
+  -v prox5-data:/app/data \
   prox5
 ```
+
+The `-v prox5-data:/app/data` volume is where the sqlite database (confession history, moderation state, and the confession counter) lives. Without it, that data — including the confession count — resets every time the container is recreated.
