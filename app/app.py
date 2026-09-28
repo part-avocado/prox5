@@ -3,7 +3,6 @@ Env vars
   SLACK_BOT_TOKEN           xoxb-...
   SLACK_APP_TOKEN           xapp-... (app-level token, connections:write)
   CONFESSIONS_KEY           Fernet key (see README / setup notes)
-  ALLOW_BROADCASTS_FROM_OP  optional, "1" lets the confessor use @channel/@here/@everyone
 """
 
 VERSION = "1.0.2"
@@ -26,7 +25,7 @@ from slack_sdk.errors import SlackApiError
 BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 CONFESSIONS = C0C5UDLBQQ0
 REVIEW = C0C4JMMU34P
-ALLOW_BROADCASTS_FROM_OP = os.environ.get("ALLOW_BROADCASTS_FROM_OP") == "1"
+ALLOW_BROADCASTS_FROM_OP = "0"
 
 MAX_LEN = 2500 
 OP_NAME = "Anonymouse"
