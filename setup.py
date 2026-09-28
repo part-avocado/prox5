@@ -15,6 +15,7 @@ import os
 import sys
 
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+IN_CONTAINER = os.environ.get("RUNNING_IN_CONTAINER") == "1"
 
 FIELDS = [
     {
@@ -46,6 +47,7 @@ FIELDS = [
         "validate": lambda v: v.startswith("C"),
     },
 ]
+ENV_KEYS = [f["key"] for f in FIELDS] + ["CONFESSIONS_KEY", "ALLOW_BROADCASTS_FROM_OP"]
 
 
 def mask(value: str) -> str:
@@ -112,7 +114,13 @@ def main():
     print(f"This will write your configuration to {ENV_PATH}\n")
 
     existing = load_existing_env(ENV_PATH)
-    if existing and not prompt_yes_no("Existing .env found, reconfigure it?", default=True):
+    from_file = bool(existing)
+    for key in ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            existing[key] = value
+
+    if from_file and not prompt_yes_no("Existing .env found, reconfigure it?", default=True):
         print("Leaving .env unchanged.")
         return
 
@@ -146,10 +154,13 @@ def main():
         f.write(f"ALLOW_BROADCASTS_FROM_OP={values['ALLOW_BROADCASTS_FROM_OP']}\n")
 
     print(f"\nWrote {ENV_PATH}")
-    print("\nNext steps:")
-    print("  pip install -r app/requirements.txt && python app/app.py")
-    print("  # or, with Docker:")
-    print("  docker build -t prox5 . && docker run --env-file .env prox5")
+    if IN_CONTAINER:
+        print("Starting the bot...\n")
+    else:
+        print("\nNext steps:")
+        print("  pip install -r app/requirements.txt && python app/app.py")
+        print("  # or, with Docker:")
+        print("  docker build -t prox5 . && docker run --env-file .env prox5")
 
 
 if __name__ == "__main__":
