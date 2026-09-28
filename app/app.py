@@ -5,7 +5,7 @@ Env vars
   CONFESSIONS_KEY           Fernet key (see README / setup notes)
 """
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 import hashlib
 import hmac
