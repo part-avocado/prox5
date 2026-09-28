@@ -10,7 +10,7 @@ Env vars
 Run `python setup.py` for an interactive wizard that fills these in for you.
 """
 
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 import hashlib
 import hmac
