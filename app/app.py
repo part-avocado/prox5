@@ -74,7 +74,7 @@ db.executescript(
         status          TEXT NOT NULL DEFAULT 'draft',  -- draft|pending|approved|rejected
         number          INTEGER,           -- public number, approved only
         pub_ts          TEXT,              -- the post in #confessions (thread root)
-        subscribed      INTEGER NOT NULL DEFAULT 1  -- 0 if the OP opted out of channel replies via /unsubscribe
+        subscribed      INTEGER NOT NULL DEFAULT 1  -- 0 if the OP opted out of channel replies via /prox5-unsub
     );
     CREATE INDEX IF NOT EXISTS idx_conf_dm  ON confessions(dm_index, dm_ts);
     CREATE INDEX IF NOT EXISTS idx_conf_pub ON confessions(pub_ts);
@@ -333,20 +333,20 @@ def handle_pub(event, client):
         relay_new(event, c, "pub", client)
 
 
-_SUBSCRIPTION_COMMANDS = ("/unsubscribe", "/subscribe")
+_SUBSCRIPTION_COMMANDS = ("/prox5-unsub", "/prox5-sub")
 
 
 def handle_subscription_command(client, dm_channel, thread_ts, c, cmd):
-    want = cmd == "/subscribe"
+    want = cmd == "/prox5-sub"
     if bool(c["subscribed"]) == want:
         msg = ("You're already subscribed to updates on this confession." if want else
                "You're already unsubscribed from updates on this confession. "
-               "Send */subscribe* any time to turn them back on.")
+               "Send */prox5-sub* any time to turn them back on.")
     else:
         run("UPDATE confessions SET subscribed=? WHERE id=?", (1 if want else 0, c["id"]))
         msg = ("You're subscribed again. Replies from the channel will show up in this thread." if want else
                "You're unsubscribed. Replies from the channel won't be sent here anymore. "
-               "Send */subscribe* any time to turn them back on. You can still reply here and it'll post to the channel.")
+               "Send */prox5-sub* any time to turn them back on. You can still reply here and it'll post to the channel.")
     client.chat_postMessage(channel=dm_channel, thread_ts=thread_ts, text=msg)
 
 
@@ -517,7 +517,7 @@ def on_approve(ack, body, client):
         thread_ts=c["dm_ts"],
         text=f":tada: Approved and posted as *Confession #{number}*. Replies from the channel will appear "
              f"in this thread, and anything you send here is posted there as {OP_NAME}. "
-             f"Send */unsubscribe* any time to stop channel replies from appearing here.",
+             f"Send */prox5-unsub* any time to stop channel replies from appearing here.",
     )
 
 
