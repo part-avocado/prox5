@@ -479,7 +479,7 @@ def on_approve(ack, body, client):
     if not ALLOW_BROADCASTS_FROM_OP:
         text = defuse_broadcasts_text(text)
 
-    post = client.chat_postMessage(channel=CONFESSIONS, text=f"[ Confession: {number} ]\n{text}")
+    post = client.chat_postMessage(channel=CONFESSIONS, text=f"#{number}\n{text}")
     run("UPDATE confessions SET pub_ts=? WHERE id=?", (post["ts"], cid))
     run("INSERT OR IGNORE INTO relays (confession_id, pub_ts, dm_ts) VALUES (?,?,?)",
         (cid, post["ts"], c["dm_ts"]))
