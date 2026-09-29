@@ -10,6 +10,12 @@ features:
     display_name: prox5
     always_online: true
   slash_commands:
+    - command: /prox5-pass
+      description: Set or change your personal prox5 encryption passkey
+      should_escape: false
+    - command: /prox5-rotate
+      description: Rotate your prox5 passkey without the previous passkey
+      should_escape: false
     - command: /sprox
       description: Subscribe to updates on your most recent prox5 submission
       should_escape: false

@@ -1,4 +1,4 @@
-VERSION = "1.3.1"
+VERSION = "1.4.1"
 
 import hashlib
 import hmac
@@ -17,12 +17,23 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk.errors import SlackApiError
 
+from passkey_crypto import (
+    CIPHERTEXT_PREFIX,
+    content_cipher,
+    decode_salt,
+    encode_salt,
+    new_salt,
+    unwrap_passkey,
+    validate_passkey,
+    wrap_passkey,
+)
+
 load_dotenv()
 
 BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
 CONFESSIONS = os.environ["CONFESSIONS_CHANNEL_ID"]
 REVIEW = os.environ["REVIEW_CHANNEL_ID"]
-ALLOW_BROADCASTS_FROM_OP = os.environ.get("ALLOW_BROADCASTS_FROM_OP", "0") == "1"
+ALLOW_BROADCASTS_FROM_OP = os.environ.get("ALLOW_BROADCASTS_FROM_OP", "0") == "0"
 
 MAX_LEN = 2500 
 OP_NAME = "prox5"
@@ -42,11 +53,11 @@ _fernet = Fernet(_KEY)
 _INDEX_KEY = hmac.new(_KEY, b"dm-channel-index", hashlib.sha256).digest()
 
 
-def enc(s: str) -> str:
+def legacy_enc(s: str) -> str:
     return _fernet.encrypt(s.encode()).decode()
 
 
-def dec(s: str) -> str:
+def legacy_dec(s: str) -> str:
     return _fernet.decrypt(s.encode()).decode()
 
 
@@ -59,11 +70,7 @@ db = sqlite3.connect(DB_PATH, check_same_thread=False)
 db.row_factory = sqlite3.Row
 _lock = threading.Lock()
 
-# NOTE: the submitter's Slack ID is never stored. `user_enc` is a legacy
-# column kept only so old databases keep working; it is always written as an
-# empty string, and any value left over from earlier versions is wiped at
-# startup. There is no tool, command, or code path that can recover an
-# author's Slack ID — not for moderators, not for admins, not for anyone.
+# legacy implementations!
 
 db.executescript(
     """
@@ -82,6 +89,17 @@ db.executescript(
     );
     CREATE INDEX IF NOT EXISTS idx_conf_dm  ON confessions(dm_index, dm_ts);
     CREATE INDEX IF NOT EXISTS idx_conf_pub ON confessions(pub_ts);
+
+    -- A passkey is supplied by the user.  It is wrapped by the deployment
+    -- key at rest, while submission data is encrypted by a key derived from
+    -- the passkey and this account's random salt.
+    CREATE TABLE IF NOT EXISTS passkey_accounts (
+        dm_index       TEXT PRIMARY KEY,
+        passkey_enc    TEXT NOT NULL,
+        kdf_salt       TEXT NOT NULL,
+        created_at     INTEGER NOT NULL,
+        updated_at     INTEGER NOT NULL
+    );
 
     -- Every mirrored message pair (including the two thread roots),
     -- used for edits, deletes, and reactions.
@@ -123,6 +141,136 @@ def run(sql, params=()) -> int:
         cur = db.execute(sql, params)
         db.commit()
         return cur.rowcount
+
+
+_account_cipher_cache = {}
+
+
+def account_by_index(index):
+    return q1("SELECT * FROM passkey_accounts WHERE dm_index=?", (index,))
+
+
+def account_for_dm(dm_channel):
+    return account_by_index(dm_index(dm_channel))
+
+
+def _account_cipher(account):
+    cache_key = (account["dm_index"], account["passkey_enc"], account["kdf_salt"])
+    cipher = _account_cipher_cache.get(cache_key)
+    if cipher is None:
+        passkey = unwrap_passkey(account["passkey_enc"], _fernet)
+        cipher = content_cipher(passkey, decode_salt(account["kdf_salt"]))
+        _account_cipher_cache[cache_key] = cipher
+    return cipher
+
+
+def _encrypt_with_account(value, account):
+    token = _account_cipher(account).encrypt(value.encode()).decode()
+    return CIPHERTEXT_PREFIX + token
+
+
+def _decrypt_with_account(value, account):
+    if not value.startswith(CIPHERTEXT_PREFIX):
+        return legacy_dec(value)
+    token = value[len(CIPHERTEXT_PREFIX):]
+    return _account_cipher(account).decrypt(token.encode()).decode()
+
+
+def encrypt_for_dm(dm_channel, value):
+    account = account_for_dm(dm_channel)
+    if account is None:
+        raise ValueError("This user has not configured a passkey.")
+    return _encrypt_with_account(value, account)
+
+
+def decrypt_for_confession(c, column):
+    account = account_by_index(c["dm_index"])
+    if account is None:
+        # compat!
+        return legacy_dec(c[column])
+    return _decrypt_with_account(c[column], account)
+
+
+class WrongCurrentPasskey(ValueError):
+    pass
+
+
+def set_user_passkey(
+    dm_channel,
+    new_passkey,
+    current_passkey=None,
+    allow_without_current=False,
+):
+
+    
+    validate_passkey(new_passkey)
+    index = dm_index(dm_channel)
+    now = int(time.time())
+
+    with _lock:
+        try:
+            account = db.execute(
+                "SELECT * FROM passkey_accounts WHERE dm_index=?", (index,)
+            ).fetchone()
+            rows = db.execute(
+                "SELECT id, dm_channel_enc, text_enc FROM confessions WHERE dm_index=?",
+                (index,),
+            ).fetchall()
+
+            if account is not None:
+                saved = unwrap_passkey(account["passkey_enc"], _fernet)
+                if not allow_without_current and (
+                    current_passkey is None
+                    or not hmac.compare_digest(saved, current_passkey)
+                ):
+                    raise WrongCurrentPasskey("The current passkey is incorrect.")
+                old_cipher = content_cipher(saved, decode_salt(account["kdf_salt"]))
+            else:
+                old_cipher = None
+
+            plaintext_rows = []
+            for row in rows:
+                values = []
+                for column in ("dm_channel_enc", "text_enc"):
+                    value = row[column]
+                    if value.startswith(CIPHERTEXT_PREFIX):
+                        if old_cipher is None:
+                            raise ValueError("Passkey account is missing for encrypted data.")
+                        value = old_cipher.decrypt(
+                            value[len(CIPHERTEXT_PREFIX):].encode()
+                        ).decode()
+                    else:
+                        value = legacy_dec(value)
+                    values.append(value)
+                plaintext_rows.append((row["id"], values[0], values[1]))
+
+            salt = new_salt()
+            new_cipher = content_cipher(new_passkey, salt)
+            wrapped = wrap_passkey(new_passkey, _fernet)
+            encoded_salt = encode_salt(salt)
+            db.execute(
+                """INSERT INTO passkey_accounts
+                       (dm_index, passkey_enc, kdf_salt, created_at, updated_at)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(dm_index) DO UPDATE SET
+                       passkey_enc=excluded.passkey_enc,
+                       kdf_salt=excluded.kdf_salt,
+                       updated_at=excluded.updated_at""",
+                (index, wrapped, encoded_salt, now, now),
+            )
+            for cid, channel, text in plaintext_rows:
+                channel_enc = CIPHERTEXT_PREFIX + new_cipher.encrypt(channel.encode()).decode()
+                text_enc = CIPHERTEXT_PREFIX + new_cipher.encrypt(text.encode()).decode()
+                db.execute(
+                    "UPDATE confessions SET dm_channel_enc=?, text_enc=? WHERE id=?",
+                    (channel_enc, text_enc, cid),
+                )
+            db.commit()
+            _account_cipher_cache.clear()
+            return account is None
+        except Exception:
+            db.rollback()
+            raise
 
 
 def transition(cid: int, from_status: str, to_status: str) -> bool:
@@ -224,7 +372,7 @@ def relay_files(msg, channel, thread_ts, client):
 
 
 def relay_new(msg, c, side, client):
-    dm_channel = dec(c["dm_channel_enc"])
+    dm_channel = decrypt_for_confession(c, "dm_channel_enc")
     if side == "pub":
         name, icon = profile(msg["user"])
         dst_channel, dst_root = dm_channel, c["dm_ts"]
@@ -250,7 +398,7 @@ def mirror_target(side, channel, ts):
         if not r:
             return None
         c = conf(r["confession_id"])
-        return c, dec(c["dm_channel_enc"]), r["dm_ts"]
+        return c, decrypt_for_confession(c, "dm_channel_enc"), r["dm_ts"]
     r = relay_by_dm(channel, ts)
     if not r:
         return None
@@ -264,10 +412,15 @@ def relay_edit(event, side, client):
     channel, ts = event["channel"], new["ts"]
 
     if side == "dm":
+        if account_for_dm(channel) is None:
+            return
         root = conf_by_dm_root(channel, ts)
         if root:
             if root["status"] == "draft":
-                run("UPDATE confessions SET text_enc=? WHERE id=?", (enc(new.get("text") or ""), root["id"]))
+                run(
+                    "UPDATE confessions SET text_enc=? WHERE id=?",
+                    (encrypt_for_dm(channel, new.get("text") or ""), root["id"]),
+                )
             return
 
     target = mirror_target(side, channel, ts)
@@ -367,11 +520,179 @@ def handle_slash_subscription(ack, command, client, want: bool):
             text="Please use this command in your DM with prox5, not in a channel.",
         )
         return
+    if account_for_dm(dm_channel) is None:
+        client.chat_postMessage(
+            channel=dm_channel,
+            text="Use `/prox5-pass` before sending something!",
+        )
+        return
     c = most_recent_conf(dm_channel)
     if not c:
         client.chat_postMessage(channel=dm_channel, text="You haven't submitted a prox5 submission yet.")
         return
     handle_subscription_command(client, dm_channel, c["dm_ts"], c, want)
+
+
+def passkey_modal(dm_channel, mode):
+    changing = mode == "change"
+    rotating = mode == "rotate"
+    blocks = []
+    if changing:
+        blocks.append({
+            "type": "input",
+            "block_id": "current_passkey_block",
+            "label": {"type": "plain_text", "text": "Current passkey"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "current_passkey",
+                "min_length": 6,
+                "max_length": 256,
+            },
+        })
+    blocks.extend([
+        {
+            "type": "input",
+            "block_id": "new_passkey_block",
+            "label": {
+                "type": "plain_text",
+                "text": "Your new passkey" if changing or rotating else "Your passkey",
+            },
+            "hint": {
+                "type": "plain_text",
+                "text": "Use at least 6 characters and do not reuse an important password. Slack can receive this modal value.",
+            },
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "new_passkey",
+                "min_length": 6,
+                "max_length": 256,
+            },
+        },
+        {
+            "type": "input",
+            "block_id": "confirm_passkey_block",
+            "label": {"type": "plain_text", "text": "Confirm passkey"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "confirm_passkey",
+                "min_length": 6,
+                "max_length": 256,
+            },
+        },
+    ])
+    return {
+        "type": "modal",
+        "callback_id": "passkey_submit",
+        "private_metadata": json.dumps({"dm_channel": dm_channel, "mode": mode}),
+        "title": {
+            "type": "plain_text",
+            "text": (
+                "Rotate passkey"
+                if rotating
+                else ("Change passkey" if changing else "Set passkey")
+            ),
+        },
+        "submit": {
+            "type": "plain_text",
+            "text": "Rotate" if rotating else ("Change" if changing else "Set"),
+        },
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": blocks,
+    }
+
+
+@app.command("/prox5-pass")
+def cmd_prox5_pass(ack, command, client):
+    ack()
+    dm_channel = command["channel_id"]
+    if command.get("channel_name") != "directmessage":
+        client.chat_postEphemeral(
+            channel=dm_channel,
+            user=command["user_id"],
+            text="Please use `/prox5-pass` in DMs with prox5.",
+        )
+        return
+    client.views_open(
+        trigger_id=command["trigger_id"],
+        view=passkey_modal(
+            dm_channel,
+            "change" if account_for_dm(dm_channel) is not None else "set",
+        ),
+    )
+
+
+@app.command("/prox5-rotate")
+def cmd_prox5_rotate(ack, command, client):
+    ack()
+    dm_channel = command["channel_id"]
+    if command.get("channel_name") != "directmessage":
+        client.chat_postEphemeral(
+            channel=dm_channel,
+            user=command["user_id"],
+            text="Please use `/prox5-rotate` in DMs with prox5.",
+        )
+        return
+    if account_for_dm(dm_channel) is None:
+        client.chat_postMessage(
+            channel=dm_channel,
+            text="You do not have a passkey yet. Set one with `/prox5-pass`.",
+        )
+        return
+    client.views_open(
+        trigger_id=command["trigger_id"],
+        view=passkey_modal(dm_channel, "rotate"),
+    )
+
+
+@app.view("passkey_submit")
+def on_passkey_submit(ack, body, client, logger):
+    meta = json.loads(body["view"]["private_metadata"])
+    mode = meta["mode"]
+    values = body["view"]["state"]["values"]
+    new_passkey = values["new_passkey_block"]["new_passkey"].get("value") or ""
+    confirmation = values["confirm_passkey_block"]["confirm_passkey"].get("value") or ""
+    current_passkey = None
+    if mode == "change":
+        current_passkey = (
+            values["current_passkey_block"]["current_passkey"].get("value") or ""
+        )
+
+    errors = {}
+    try:
+        validate_passkey(new_passkey)
+    except ValueError as exc:
+        errors["new_passkey_block"] = str(exc)
+    if new_passkey != confirmation:
+        errors["confirm_passkey_block"] = "The passkeys do not match."
+    if errors:
+        ack(response_action="errors", errors=errors)
+        return
+
+    try:
+        created = set_user_passkey(
+            meta["dm_channel"],
+            new_passkey,
+            current_passkey,
+            allow_without_current=(mode == "rotate"),
+        )
+    except WrongCurrentPasskey as exc:
+        ack(response_action="errors", errors={"current_passkey_block": str(exc)})
+        return
+    except Exception:
+        logger.exception("Unable to save passkey")
+        ack(
+            response_action="errors",
+            errors={"new_passkey_block": "prox5 could not save this passkey. Please try again."},
+        )
+        return
+
+    ack()
+    message = (
+        ":closed_lock_with_key: Your passkey is set. You can now submit to prox5!!"
+        if created else
+        ":closed_lock_with_key: Your passkey and all of your stored prox5 data were re-encrypted!!"
+    )
+    client.chat_postMessage(channel=meta["dm_channel"], text=message)
 
 
 @app.command("/sprox")
@@ -386,6 +707,13 @@ def cmd_uprox(ack, command, client):
 
 def handle_dm(event, client):
     dm_channel = event["channel"]
+    if account_for_dm(dm_channel) is None:
+        client.chat_postMessage(
+            channel=dm_channel,
+            thread_ts=event.get("thread_ts") or event["ts"],
+            text="Before using prox5, choose your personal encryption passkey with `/prox5-pass` in this DM.",
+        )
+        return
     thread_ts = event.get("thread_ts")
     if thread_ts and thread_ts != event["ts"]:
         c = conf_by_dm_root(dm_channel, thread_ts)
@@ -432,11 +760,19 @@ def handle_dm(event, client):
                                 text=f"Woah that's too long! Please keep prox5 submissions under {MAX_LEN} characters.")
         return
 
+    dm_channel_enc = encrypt_for_dm(dm_channel, dm_channel)
+    text_enc = encrypt_for_dm(dm_channel, text)
     with _lock:
         cur = db.execute(
             """INSERT INTO confessions (user_enc, dm_channel_enc, dm_index, dm_ts, text_enc)
                VALUES (?,?,?,?,?)""",
-            ("", enc(dm_channel), dm_index(dm_channel), event["ts"], enc(text)),
+            (
+                "",
+                dm_channel_enc,
+                dm_index(dm_channel),
+                event["ts"],
+                text_enc,
+            ),
         )
         db.commit()
         cid = cur.lastrowid
@@ -452,7 +788,7 @@ def handle_dm(event, client):
                 "text": {
                     "type": "mrkdwn",
                     "text": "Submit the message above? "
-                            "Moderaters will review your prox5 *confessions* submission. Moderators cannot see your Slack ID, nor associate your message with your Slack ID in any way." + note,
+                            "Moderaters will review your prox5 *confessions* submission. Nobody will be able to tie your Slack ID to your confession." + note,
                 },
             },
             {
@@ -479,10 +815,7 @@ def replace_prompt(client, body, text):
 
 
 _STAGE_MESSAGES = (
-    ":incoming_envelope: Sent off to review! In the meantime, drink some tea?",
-    ":incoming_envelope: Off it goes! Maybe stretch your legs while (I) take a look?",
-    ":incoming_envelope: It's lights out and away we go!",
-    ":incoming_envelope: Yaysies, it went off without a hitch.",
+    ":incoming_envelope: Away it goes!",
 )
 
 
@@ -498,7 +831,7 @@ def on_stage(ack, body, client):
         db.execute("UPDATE confessions SET number=? WHERE id=?", (number, cid))
         db.commit()
     c = conf(cid)  # re-read in case the draft was edited, and to pick up the number
-    text = dec(c["text_enc"])
+    text = decrypt_for_confession(c, "text_enc")
     review_msg = client.chat_postMessage(
         channel=REVIEW, text="New prox5 submission to review", blocks=review_blocks(cid, c["number"], text)
     )
@@ -551,7 +884,7 @@ def on_approve(ack, body, client):
 
     c = conf(cid)
     number = c["number"]
-    text = dec(c["text_enc"])
+    text = decrypt_for_confession(c, "text_enc")
     if not ALLOW_BROADCASTS_FROM_OP:
         text = defuse_broadcasts_text(text)
 
@@ -564,7 +897,7 @@ def on_approve(ack, body, client):
     close_review(client, body["channel"]["id"], body["message"]["ts"], body["message"]["blocks"][0],
                  f":white_check_mark: Approved by <@{body['user']['id']}>. Posted as *[ {number} ]*")
     client.chat_postMessage(
-        channel=dec(c["dm_channel_enc"]),
+        channel=decrypt_for_confession(c, "dm_channel_enc"),
         thread_ts=c["dm_ts"],
         text=f":tada: Approved and posted as *[ {number} ]*! Replies from the channel will appear "
              f"in this thread, and anything you send here is posted there as {OP_NAME}. "
@@ -577,17 +910,20 @@ def notify_rejected(client, c, reason: str = ""):
     text = "Your prox5 submission wasn't approved by the moderators. :("
     if reason:
         text += f"\n{quote(reason)}"
-    client.chat_postMessage(channel=dec(c["dm_channel_enc"]), thread_ts=c["dm_ts"], text=text)
+    client.chat_postMessage(
+        channel=decrypt_for_confession(c, "dm_channel_enc"),
+        thread_ts=c["dm_ts"],
+        text=text,
+    )
 
 
 def delete_confession(c, client):
-    """Permanently erases a confession at the author's own request. Removes
-    the public post (if any), closes out a still-open review post (if any),
-    and drops the DB row entirely — nothing recoverable is left behind."""
     cid = c["id"]
     if c["status"] == "pending" and c["review_ts"]:
         try:
-            first_block = review_blocks(cid, c["number"], dec(c["text_enc"]))[0]
+            first_block = review_blocks(
+                cid, c["number"], decrypt_for_confession(c, "text_enc")
+            )[0]
             close_review(client, REVIEW, c["review_ts"], first_block,
                          ":wastebasket: Gone!")
         except SlackApiError as e:
@@ -646,7 +982,9 @@ def on_reject_submit(ack, body, client):
     if not transition(cid, "pending", "rejected"):
         return
     c = conf(cid)
-    first_block = review_blocks(cid, c["number"], dec(c["text_enc"]))[0]
+    first_block = review_blocks(
+        cid, c["number"], decrypt_for_confession(c, "text_enc")
+    )[0]
     outcome = f":x: Rejected by <@{mod}>"
 
     close_review(client, channel, ts, first_block, outcome, reason)

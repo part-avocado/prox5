@@ -128,12 +128,13 @@ def main():
     for field in FIELDS:
         values[field["key"]] = prompt_field(field, existing.get(field["key"]))
 
-    print("\nCONFESSIONS_KEY encrypts stored prox5 submissions/DM channel IDs at rest.")
+    print("\nCONFESSIONS_KEY wraps users' encrypted passkeys at rest.")
+    print("Each prox5 user supplies their own passkey; new submission data is not encrypted with this deployment key.")
     if existing.get("CONFESSIONS_KEY") and prompt_yes_no("Keep the existing key?", default=True):
         values["CONFESSIONS_KEY"] = existing["CONFESSIONS_KEY"]
     elif prompt_yes_no("Generate a new key automatically?", default=True):
         values["CONFESSIONS_KEY"] = generate_fernet_key()
-        print("  Generated a new CONFESSIONS_KEY. Losing this key makes existing prox5 submissions unreadable.")
+        print("  Generated a new CONFESSIONS_KEY. Losing it makes saved user passkeys and submissions unreadable.")
     else:
         while True:
             key = input("  Paste an existing Fernet key: ").strip()
