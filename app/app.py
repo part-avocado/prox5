@@ -1,4 +1,4 @@
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 
 import hashlib
 import hmac
@@ -59,18 +59,17 @@ db = sqlite3.connect(DB_PATH, check_same_thread=False)
 db.row_factory = sqlite3.Row
 _lock = threading.Lock()
 
-# NOTE: this bot has no feature, button, command, or code path that decrypts
-# or displays a submitter's Slack ID (`user_enc`), to anyone, ever — not to
-# moderators, not to admins. That column is write-only from here. The only
-# way to recover an author's identity is deanon.py, a separate CLI tool
-# that must be run directly on the host with shell access. See its
-# docstring and README.md for why that's intentional.
+# NOTE: the submitter's Slack ID is never stored. `user_enc` is a legacy
+# column kept only so old databases keep working; it is always written as an
+# empty string, and any value left over from earlier versions is wiped at
+# startup. There is no tool, command, or code path that can recover an
+# author's Slack ID — not for moderators, not for admins, not for anyone.
 
 db.executescript(
     """
     CREATE TABLE IF NOT EXISTS confessions (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_enc        TEXT NOT NULL,     -- encrypted author Slack ID
+        user_enc        TEXT NOT NULL,     -- legacy; always '' (author Slack IDs are not stored)
         dm_channel_enc  TEXT NOT NULL,     -- encrypted DM channel ID
         dm_index        TEXT NOT NULL,     -- HMAC of DM channel, for lookups
         dm_ts           TEXT NOT NULL,     -- the author's original DM (thread root)
@@ -103,6 +102,8 @@ if "subscribed" not in _conf_cols:
 if "review_ts" not in _conf_cols:
     db.execute("ALTER TABLE confessions ADD COLUMN review_ts TEXT")
     db.commit()
+db.execute("UPDATE confessions SET user_enc='' WHERE user_enc != ''")
+db.commit()
 
 
 def q(sql, params=()):
@@ -435,7 +436,7 @@ def handle_dm(event, client):
         cur = db.execute(
             """INSERT INTO confessions (user_enc, dm_channel_enc, dm_index, dm_ts, text_enc)
                VALUES (?,?,?,?,?)""",
-            (enc(event["user"]), enc(dm_channel), dm_index(dm_channel), event["ts"], enc(text)),
+            ("", enc(dm_channel), dm_index(dm_channel), event["ts"], enc(text)),
         )
         db.commit()
         cid = cur.lastrowid
