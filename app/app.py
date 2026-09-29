@@ -1,4 +1,4 @@
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 
 import hashlib
 import hmac
@@ -59,6 +59,13 @@ db = sqlite3.connect(DB_PATH, check_same_thread=False)
 db.row_factory = sqlite3.Row
 _lock = threading.Lock()
 
+# NOTE: this bot has no feature, button, command, or code path that decrypts
+# or displays a submitter's Slack ID (`user_enc`), to anyone, ever — not to
+# moderators, not to admins. That column is write-only from here. The only
+# way to recover an author's identity is deanon.py, a separate CLI tool
+# that must be run directly on the host with shell access. See its
+# docstring and README.md for why that's intentional.
+
 db.executescript(
     """
     CREATE TABLE IF NOT EXISTS confessions (
@@ -71,7 +78,8 @@ db.executescript(
         status          TEXT NOT NULL DEFAULT 'draft',  -- draft|pending|approved|rejected
         number          INTEGER,           -- assigned once staged for review; reused as the public post number if approved
         pub_ts          TEXT,              -- the post in #confessions (thread root)
-        subscribed      INTEGER NOT NULL DEFAULT 1  -- 0 if the OP opted out of channel replies via `unsub`
+        subscribed      INTEGER NOT NULL DEFAULT 1, -- 0 if the OP opted out of channel replies via `unsub`
+        review_ts       TEXT               -- the review-channel post, so a withdrawal can update/close it
     );
     CREATE INDEX IF NOT EXISTS idx_conf_dm  ON confessions(dm_index, dm_ts);
     CREATE INDEX IF NOT EXISTS idx_conf_pub ON confessions(pub_ts);
@@ -91,6 +99,9 @@ db.commit()
 _conf_cols = [r[1] for r in db.execute("PRAGMA table_info(confessions)").fetchall()]
 if "subscribed" not in _conf_cols:
     db.execute("ALTER TABLE confessions ADD COLUMN subscribed INTEGER NOT NULL DEFAULT 1")
+    db.commit()
+if "review_ts" not in _conf_cols:
+    db.execute("ALTER TABLE confessions ADD COLUMN review_ts TEXT")
     db.commit()
 
 
@@ -321,6 +332,11 @@ def handle_pub(event, client):
 _UNSUB_WORDS = ("unsub", "unsubscribe")
 _SUB_WORDS = ("sub", "subscribe")
 
+_DELETE_TRIGGER = "!deleteoriginal"
+_DELETE_CONFIRM = "delete original message"
+_DELETE_CONFIRM_WINDOW = 300  # seconds to confirm after triggering
+_pending_deletes = {}  # (dm_index, dm_ts) -> expiry epoch
+
 
 def handle_subscription_command(client, dm_channel, thread_ts, c, want: bool):
     if bool(c["subscribed"]) == want:
@@ -375,6 +391,20 @@ def handle_dm(event, client):
         cmd = (event.get("text") or "").strip().lower().lstrip("/")
         if not c:
             msg = "Hmm... I couldn't match this thread. Send a new message (not in a thread) to start one!"
+        elif cmd == _DELETE_TRIGGER:
+            _pending_deletes[(c["dm_index"], c["dm_ts"])] = time.time() + _DELETE_CONFIRM_WINDOW
+            msg = (
+                ":warning: This will *permanently delete* your prox5 submission"
+                + (" and remove it from the channel" if c["pub_ts"] else "")
+                + f". This cannot be undone.\nTo confirm, reply with exactly: `{_DELETE_CONFIRM}`"
+            )
+        elif cmd == _DELETE_CONFIRM:
+            expiry = _pending_deletes.pop((c["dm_index"], c["dm_ts"]), 0)
+            if time.time() > expiry:
+                msg = f"No pending deletion to confirm. Send `{_DELETE_TRIGGER}` first."
+            else:
+                delete_confession(c, client)
+                msg = ":wastebasket: Done — your prox5 submission has been permanently deleted."
         elif cmd in _UNSUB_WORDS or cmd in _SUB_WORDS:
             handle_subscription_command(client, dm_channel, thread_ts, c, cmd in _SUB_WORDS)
             return
@@ -421,8 +451,7 @@ def handle_dm(event, client):
                 "text": {
                     "type": "mrkdwn",
                     "text": "Submit the message above? "
-                            "Moderaters will review your prox5 *confessions* submission. Moderators never see your Slack ID — "
-                            "submissions are only rejected for violating the Code of Conduct." + note,
+                            "Moderaters will review your prox5 *confessions* submission. Moderators cannot see your Slack ID, nor associate your message with your Slack ID in any way." + note,
                 },
             },
             {
@@ -469,7 +498,10 @@ def on_stage(ack, body, client):
         db.commit()
     c = conf(cid)  # re-read in case the draft was edited, and to pick up the number
     text = dec(c["text_enc"])
-    client.chat_postMessage(channel=REVIEW, text="New prox5 submission to review", blocks=review_blocks(cid, c["number"], text))
+    review_msg = client.chat_postMessage(
+        channel=REVIEW, text="New prox5 submission to review", blocks=review_blocks(cid, c["number"], text)
+    )
+    run("UPDATE confessions SET review_ts=? WHERE id=?", (review_msg["ts"], cid))
     replace_prompt(client, body, random.choice(_STAGE_MESSAGES))
 
 
@@ -535,7 +567,8 @@ def on_approve(ack, body, client):
         thread_ts=c["dm_ts"],
         text=f":tada: Approved and posted as *[ {number} ]*! Replies from the channel will appear "
              f"in this thread, and anything you send here is posted there as {OP_NAME}. "
-             f"Send `unsub` any time to stop channel replies from appearing here.",
+             f"Send `unsub` any time to stop channel replies from appearing here, or "
+             f"`{_DELETE_TRIGGER}` to permanently delete this submission from the channel.",
     )
 
 
@@ -544,6 +577,29 @@ def notify_rejected(client, c, reason: str = ""):
     if reason:
         text += f"\n{quote(reason)}"
     client.chat_postMessage(channel=dec(c["dm_channel_enc"]), thread_ts=c["dm_ts"], text=text)
+
+
+def delete_confession(c, client):
+    """Permanently erases a confession at the author's own request. Removes
+    the public post (if any), closes out a still-open review post (if any),
+    and drops the DB row entirely — nothing recoverable is left behind."""
+    cid = c["id"]
+    if c["status"] == "pending" and c["review_ts"]:
+        try:
+            first_block = review_blocks(cid, c["number"], dec(c["text_enc"]))[0]
+            close_review(client, REVIEW, c["review_ts"], first_block,
+                         ":wastebasket: Gone!")
+        except SlackApiError as e:
+            if e.response["error"] != "message_not_found":
+                raise
+    if c["pub_ts"]:
+        try:
+            client.chat_delete(channel=CONFESSIONS, ts=c["pub_ts"])
+        except SlackApiError as e:
+            if e.response["error"] != "message_not_found":
+                raise
+    run("DELETE FROM relays WHERE confession_id=?", (cid,))
+    run("DELETE FROM confessions WHERE id=?", (cid,))
 
 
 def reject_modal(cid: int, channel: str, ts: str):
@@ -557,12 +613,12 @@ def reject_modal(cid: int, channel: str, ts: str):
         "blocks": [{
             "type": "input",
             "block_id": "reason_block",
-            "label": {"type": "plain_text", "text": "Which Code of Conduct rule does this violate?"},
+            "label": {"type": "plain_text", "text": "Reason shown to submitter"},
             "element": {
                 "type": "plain_text_input",
                 "action_id": "reason",
                 "multiline": True,
-                "placeholder": {"type": "plain_text", "text": "Shown to the author."},
+                "placeholder": {"type": "plain_text", "text": "https://hack.club/coc"},
             },
         }],
     }
@@ -584,14 +640,15 @@ def on_reject_submit(ack, body, client):
     meta = json.loads(body["view"]["private_metadata"])
     cid, channel, ts = meta["cid"], meta["channel"], meta["ts"]
     reason = (body["view"]["state"]["values"]["reason_block"]["reason"].get("value") or "").strip()
+    mod = body["user"]["id"]
 
     if not transition(cid, "pending", "rejected"):
         return
     c = conf(cid)
-    mod = body["user"]["id"]
     first_block = review_blocks(cid, c["number"], dec(c["text_enc"]))[0]
+    outcome = f":x: Rejected by <@{mod}>"
 
-    close_review(client, channel, ts, first_block, f":x: Rejected by <@{mod}>", reason)
+    close_review(client, channel, ts, first_block, outcome, reason)
     notify_rejected(client, c, reason)
 
 
