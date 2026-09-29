@@ -60,6 +60,67 @@ db = sqlite3.connect(DB_PATH, check_same_thread=False)
 db.row_factory = sqlite3.Row
 _lock = threading.Lock()
 
+# --- Identity-reveal lockdown -------------------------------------------------
+# The "Reject & Report" action is the only code path that ever decrypts a
+# submitter's Slack ID. It is intentionally locked down so that no one
+# operating purely inside Slack — not even a moderator with access to the
+# review channel — can pull an identity. Filing a report requires ALL of:
+#   1. Being on ADMIN_USER_IDS (set via env, i.e. requires shell/file access
+#      to the host to configure).
+#   2. Knowing REPORT_PASSPHRASE (a secret distributed out-of-band by whoever
+#      administers the host; not discoverable from within Slack).
+#   3. Not being on cooldown (rate-limits how fast even an authorized admin
+#      can reveal identities).
+# On success, the identity is never posted to Slack. It is appended to a
+# root/administrator-only log file on the host — reading it requires shell
+# access to that file, which is the whole point.
+ADMIN_USER_IDS = {x.strip() for x in os.environ.get("ADMIN_USER_IDS", "").split(",") if x.strip()}
+REPORT_PASSPHRASE = os.environ.get("REPORT_PASSPHRASE", "")
+REPORT_COOLDOWN_SECONDS = int(os.environ.get("REPORT_COOLDOWN_SECONDS", "60"))
+REPORTS_LOG_PATH = os.environ.get(
+    "REPORTS_LOG_PATH", os.path.join(os.path.dirname(DB_PATH) or ".", "reports.log")
+)
+_report_cooldowns = {}
+_report_lock = threading.Lock()
+
+
+def _secure_append(path: str, entry: dict):
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a") as f:
+        f.write(json.dumps(entry, default=str) + "\n")
+
+
+def audit_log(event: str, **fields):
+    with _report_lock:
+        _secure_append(
+            REPORTS_LOG_PATH,
+            {"ts": datetime.now(timezone.utc).isoformat(), "event": event, **fields},
+        )
+
+
+def can_attempt_report(mod: str) -> bool:
+    return bool(REPORT_PASSPHRASE) and mod in ADMIN_USER_IDS
+
+
+def check_report_auth(mod: str, passphrase: str):
+    """Returns None if authorized, else a reason string for denial."""
+    if not can_attempt_report(mod):
+        return "not_admin_or_disabled"
+    if not hmac.compare_digest(passphrase.encode(), REPORT_PASSPHRASE.encode()):
+        return "bad_passphrase"
+    with _report_lock:
+        last = _report_cooldowns.get(mod, 0)
+        if time.time() - last < REPORT_COOLDOWN_SECONDS:
+            return "cooldown"
+        _report_cooldowns[mod] = time.time()
+    return None
+
 db.executescript(
     """
     CREATE TABLE IF NOT EXISTS confessions (
@@ -504,7 +565,9 @@ def review_blocks(cid: int, number: int, text: str):
                  "confirm": {
                      "title": {"type": "plain_text", "text": "Reject and report?"},
                      "text": {"type": "plain_text",
-                              "text": "This reveals the author's Slack ID to you privately so you can file a report."},
+                              "text": "This does NOT reveal the author's Slack ID to you or anyone in Slack. "
+                                      "It requires admin authorization and a passphrase, and the identity is "
+                                      "logged only to a file on the bot's host that requires shell access to read."},
                      "confirm": {"type": "plain_text", "text": "Report"},
                      "deny": {"type": "plain_text", "text": "Cancel"},
                  }},
@@ -564,8 +627,21 @@ def reject_modal(cid: int, report: bool, channel: str, ts: str):
     if report:
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": ":warning: This reveals the author's Slack ID in the review "
-                                                "thread so a moderator can file a report to Shroud."},
+            "text": {"type": "mrkdwn", "text": ":lock: This does *not* reveal the author's Slack ID to you or "
+                                                "anyone in Slack. It is written only to a secured file on the "
+                                                "bot's host, readable only with shell/root access to that host. "
+                                                "You must enter the current report passphrase, known only to "
+                                                "server administrators, to proceed."},
+        })
+        blocks.append({
+            "type": "input",
+            "block_id": "passphrase_block",
+            "label": {"type": "plain_text", "text": "Report passphrase"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "passphrase",
+                "placeholder": {"type": "plain_text", "text": "Ask a server administrator for this"},
+            },
         })
     blocks.append({
         "type": "input",
@@ -600,10 +676,25 @@ def on_reject(ack, body, client):
     )
 
 
+_DENIAL_MESSAGES = {
+    "not_admin_or_disabled": "You're not authorized to file identity reports. This attempt has been logged.",
+    "bad_passphrase": "Incorrect passphrase.",
+    "cooldown": f"Please wait before filing another report (cooldown: {REPORT_COOLDOWN_SECONDS}s).",
+}
+
+
 @app.action("reject_report")
 def on_reject_report(ack, body, client):
     ack()
     cid = int(body["actions"][0]["value"])
+    mod = body["user"]["id"]
+    if not can_attempt_report(mod):
+        audit_log("report_denied", moderator=mod, confession_id=cid, reason="not_admin_or_disabled")
+        client.chat_postEphemeral(
+            channel=body["channel"]["id"], user=mod,
+            text=_DENIAL_MESSAGES["not_admin_or_disabled"],
+        )
+        return
     client.views_open(
         trigger_id=body["trigger_id"],
         view=reject_modal(cid, True, body["channel"]["id"], body["message"]["ts"]),
@@ -612,38 +703,52 @@ def on_reject_report(ack, body, client):
 
 @app.view("reject_submit")
 def on_reject_submit(ack, body, client):
-    ack()
     meta = json.loads(body["view"]["private_metadata"])
     cid, report, channel, ts = meta["cid"], meta["report"], meta["channel"], meta["ts"]
     reason = (body["view"]["state"]["values"]["reason_block"]["reason"].get("value") or "").strip()
+    mod = body["user"]["id"]
+
+    if report:
+        passphrase = (
+            body["view"]["state"]["values"]
+            .get("passphrase_block", {})
+            .get("passphrase", {})
+            .get("value") or ""
+        )
+        denial = check_report_auth(mod, passphrase)
+        if denial:
+            audit_log("report_denied", moderator=mod, confession_id=cid, reason=denial)
+            ack(response_action="errors", errors={"passphrase_block": _DENIAL_MESSAGES[denial]})
+            return
+
+    ack()
 
     if not transition(cid, "pending", "rejected"):
         return
     c = conf(cid)
-    mod = body["user"]["id"]
     first_block = review_blocks(cid, c["number"], dec(c["text_enc"]))[0]
 
     if report:
         author = dec(c["user_enc"])
-        content = dec(c["text_enc"]).replace("```", "'''")
-        report_text = (
-            f"prox5 submission info\n"
-            f"Author Slack ID: {author}\n"
-            f"Time sent: {sent_time(c['dm_ts'])}\n"
-            + (f"Reason: {reason}\n" if reason else "")
-            + f"Message:\n{content}"
+        content = dec(c["text_enc"])
+        audit_log(
+            "report_filed",
+            moderator=mod,
+            confession_id=cid,
+            confession_number=c["number"],
+            author_slack_id=author,
+            submitted_at=sent_time(c["dm_ts"]),
+            reason=reason,
+            message=content,
         )
         client.chat_postMessage(
             channel=channel,
             thread_ts=ts,
-            text=f":rotating_light: Report for *[ {c['number']} ]*. Author: <@{author}>. Copy to Shroud:",
-            blocks=[
-                {"type": "section", "text": {"type": "mrkdwn",
-                 "text": f":rotating_light: *Report for [ {c['number']} ].* Author: <@{author}>\nCopy to Shroud:"}},
-                {"type": "section", "text": {"type": "mrkdwn", "text": f"```{report_text}```"}},
-            ],
+            text=f":rotating_light: *[ {c['number']} ]* rejected & reported by <@{mod}>. "
+                 f"The author's identity was *not* revealed here — it was written to a secured, "
+                 f"shell-access-only log on the bot's host.",
         )
-        outcome = f":rotating_light: Rejected & reported by <@{mod}>. Report details posted in thread."
+        outcome = f":rotating_light: Rejected & reported by <@{mod}>. Identity logged securely, not shown in Slack."
     else:
         outcome = f":x: Rejected by <@{mod}>"
 

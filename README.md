@@ -41,8 +41,38 @@ docker run -d --name prox5 \
   -e REVIEW_CHANNEL_ID=C0123456789 \
   -e CONFESSIONS_KEY=<fernet-key> \
   -e ALLOW_BROADCASTS_FROM_OP=0 \
+  -e ADMIN_USER_IDS=U0123456789,U0987654321 \
+  -e REPORT_PASSPHRASE=<a-long-random-secret> \
   -v prox5-data:/app/data \
   prox5
 ```
 
 The `-v prox5-data:/app/data` volume is where the sqlite database (prox5 submission history, moderation state, and the submission counter) lives. Without it, that data — including the submission count — resets every time the container is recreated.
+
+## Identity protection ("Reject & Report")
+
+A submitter's Slack ID is stored encrypted (`CONFESSIONS_KEY`, a Fernet key)
+and is **never** decrypted or shown anywhere in Slack — not in the review
+channel, not to moderators, not even to the person who files a report.
+
+The "Reject & Report" button is the only thing that can ever decrypt an
+identity, and it's deliberately hard to use:
+
+- `ADMIN_USER_IDS` — comma-separated Slack user IDs allowed to even attempt
+  a report. Everyone else is bounced immediately and the attempt is logged.
+  Only whoever has shell/file access to edit the bot's `.env` can grant this.
+- `REPORT_PASSPHRASE` — a separate shared secret that must be typed into the
+  report modal on top of being an admin. Distribute it out-of-band (not over
+  Slack) to the people who should actually be able to file reports, and
+  rotate it by editing `.env` — which again requires host access.
+- `REPORT_COOLDOWN_SECONDS` (default `60`) — rate-limits how often even an
+  authorized admin can file a report, to prevent rapid bulk deanonymization.
+
+On a successful report, the decrypted identity, message, and reason are
+appended to a local log file (`REPORTS_LOG_PATH`, default
+`data/reports.log`), created with `0600` permissions in a `0700` directory.
+Nothing is posted to Slack besides a generic "rejected & reported"
+notice. Reading that file — the only place a Slack ID is ever written in
+the clear — requires shell/root access to the host running the bot.
+Every attempt to report (granted or denied) is also written there for
+auditing.
