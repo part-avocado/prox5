@@ -1,8 +1,14 @@
 """
 Root/shell-only tool to decrypt a single prox5 submission's author Slack ID.
 
-There is nothing in the bot itself — no button, command, or admin role in
-Slack — that can do this. It is deliberately not automated or convenient:
+There is nothing in the bot itself, and nothing in Slack at all, that can do
+this — no button, no admin role, no "report" feature. Deanonymizing is only
+ever legitimate for a submission that was already sent through (approved and
+posted to the public channel); this tool refuses to run on anything still a
+draft, pending review, or rejected, since there's no one left to complain
+about and nothing to act on.
+
+It's also deliberately not automated or convenient:
 
   1. You need shell access to the host/container running prox5 (e.g.
      `docker exec -it prox5 python3 deanon.py <id>`), and the same
@@ -18,11 +24,13 @@ Slack — that can do this. It is deliberately not automated or convenient:
   4. You must type a non-empty reason for the lookup.
   5. You then wait out a mandatory countdown before the ID is shown.
 
-Every attempt — successful, wrong code, empty reason, or aborted — is
-appended to the same append-only, 0600-permissioned log the rest of the
-app treats as sensitive (REPORTS_LOG_PATH, default data/reports.log).
-That log, plus this script, is the entire deanonymization surface. Nothing
-about it is reachable over the network or from Slack.
+Every attempt — successful, wrong status, wrong code, empty reason, or
+aborted — is appended to the same append-only, 0600-permissioned log
+(DEANON_LOG_PATH, default data/deanon.log). That log, plus this script, is
+the entire deanonymization surface. Nothing about it is reachable over the
+network or from Slack. Note also that the author can permanently delete a
+submission themselves (including an already-approved one) at any time,
+which removes the row this tool depends on entirely.
 
 Usage:
     python3 deanon.py <confession_id>
@@ -43,22 +51,22 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DB_PATH = os.environ.get("DB_PATH", "data/confessions.db")
-REPORTS_LOG_PATH = os.environ.get(
-    "REPORTS_LOG_PATH", os.path.join(os.path.dirname(DB_PATH) or ".", "reports.log")
+DEANON_LOG_PATH = os.environ.get(
+    "DEANON_LOG_PATH", os.path.join(os.path.dirname(DB_PATH) or ".", "deanon.log")
 )
 DEANON_DELAY_SECONDS = int(os.environ.get("DEANON_DELAY_SECONDS", "20"))
 OPERATOR = os.environ.get("SUDO_USER") or os.environ.get("USER") or "unknown"
 
 
 def audit(event: str, **fields):
-    d = os.path.dirname(REPORTS_LOG_PATH) or "."
+    d = os.path.dirname(DEANON_LOG_PATH) or "."
     os.makedirs(d, exist_ok=True)
     try:
         os.chmod(d, 0o700)
     except OSError:
         pass
     entry = {"ts": datetime.now(timezone.utc).isoformat(), "event": event, "operator": OPERATOR, **fields}
-    fd = os.open(REPORTS_LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = os.open(DEANON_LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a") as f:
         f.write(json.dumps(entry, default=str) + "\n")
 
@@ -90,6 +98,13 @@ def main():
     row = db.execute("SELECT * FROM confessions WHERE id=?", (cid,)).fetchone()
     if not row:
         fail(cid, "not_found", f"No confession with id={cid}.")
+
+    if row["status"] != "approved" or not row["pub_ts"]:
+        fail(
+            cid, f"refused_status_{row['status']}",
+            f"id={cid} has status={row['status']!r} and was never sent through to the channel. "
+            "Deanonymization is only permitted for submissions that were actually posted.",
+        )
 
     print(f"id={row['id']}  number={row['number']}  status={row['status']}  dm_ts={row['dm_ts']}")
     print()
