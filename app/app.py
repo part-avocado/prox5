@@ -1,16 +1,3 @@
-"""
-Env vars
-  SLACK_BOT_TOKEN           xoxb-...
-  SLACK_APP_TOKEN           xapp-... (app-level token, connections:write)
-  CONFESSIONS_CHANNEL_ID    channel where approved prox5 submissions are posted
-  REVIEW_CHANNEL_ID         private moderator channel
-  CONFESSIONS_KEY           Fernet key (see README / setup notes)
-  ALLOW_BROADCASTS_FROM_OP  optional, "1" lets the submitter use @channel/@here/@everyone
-  DB_PATH                   optional, path to the sqlite database (default: data/confessions.db)
-
-Run `python setup.py` for an interactive wizard that fills these in for you.
-"""
-
 VERSION = "1.0.12"
 
 import hashlib
@@ -122,7 +109,6 @@ def run(sql, params=()) -> int:
 
 
 def transition(cid: int, from_status: str, to_status: str) -> bool:
-    """Atomic status change; False if someone else already acted on it."""
     return run(
         "UPDATE confessions SET status=? WHERE id=? AND status=?", (to_status, cid, from_status)
     ) == 1
@@ -170,8 +156,6 @@ def defuse_broadcasts_blocks(node):
 
 
 def message_payload(msg: dict, allow_broadcasts: bool) -> dict:
-    """Rebuild a message as faithfully as possible (rich_text blocks keep formatting,
-    mentions, emoji, links)."""
     text = msg.get("text") or ""
     blocks = msg.get("blocks")
     if not allow_broadcasts:
@@ -227,7 +211,6 @@ def relay_files(msg, channel, thread_ts, client):
 
 
 def relay_new(msg, c, side, client):
-    """side='pub': channel reply -> DM.  side='dm': confessor reply -> channel."""
     dm_channel = dec(c["dm_channel_enc"])
     if side == "pub":
         name, icon = profile(msg["user"])
@@ -249,7 +232,6 @@ def relay_new(msg, c, side, client):
 
 
 def mirror_target(side, channel, ts):
-    """Given a source message, return (confession_row, dst_channel, dst_ts) or None."""
     if side == "pub":
         r = relay_by_pub(ts)
         if not r:
@@ -271,8 +253,6 @@ def relay_edit(event, side, client):
     if side == "dm":
         root = conf_by_dm_root(channel, ts)
         if root:
-            # Editing the original DM only updates an unsubmitted draft.
-            # Approved confessions never change without moderation.
             if root["status"] == "draft":
                 run("UPDATE confessions SET text_enc=? WHERE id=?", (enc(new.get("text") or ""), root["id"]))
             return
@@ -291,7 +271,7 @@ def relay_delete(event, side, client):
         return
     channel, ts = event["channel"], event["deleted_ts"]
     if side == "dm" and conf_by_dm_root(channel, ts):
-        return  # deleting the original DM doesn't unpublish a moderated confession
+        return 
     target = mirror_target(side, channel, ts)
     if not target:
         return
@@ -337,12 +317,6 @@ def handle_pub(event, client):
     if c and c["subscribed"]:
         relay_new(event, c, "pub", client)
 
-
-# Slack intercepts any message starting with "/" client-side as an attempted slash
-# command, and since these aren't registered slash commands it refuses to send them
-# at all -- so the trigger words can't start with a slash. `.lstrip("/")` below is a
-# defensive extra in case one ever slips through (e.g. Slack's own "escape with a
-# leading space" workaround).
 _UNSUB_WORDS = ("unsub", "unsubscribe")
 _SUB_WORDS = ("sub", "subscribe")
 
@@ -366,12 +340,6 @@ def most_recent_conf(dm_channel):
         (dm_index(dm_channel),),
     )
 
-
-# /sprox and /uprox are registered Slack slash commands, which Slack only ever
-# delivers from the top level of a DM -- never from inside a thread reply (this
-# is a hard platform restriction, not something we can configure around). So
-# unlike the in-thread `sub`/`unsub` text triggers above, these act on the
-# user's most recently submitted confession rather than a specific thread.
 def handle_slash_subscription(ack, command, client, want: bool):
     ack()
     dm_channel = command["channel_id"]
@@ -417,7 +385,7 @@ def handle_dm(event, client):
                 "draft": "Use the *Stage* or *Cancel* buttons above first!",
                 "pending": "This prox5 submission is still under review. Please try again later!",
                 "rejected": "This prox5 submission was not approved.",
-                "approved": "Please wait... We're trying to send your prox5 submission. Try again momentarily, or ping @partavocado on Slack.",
+                "approved": "Please wait... We're  to send your prox5 submission. Try again momentarily, or ping @partavocado on Slack.",
             }[c["status"]]
         client.chat_postMessage(channel=dm_channel, thread_ts=thread_ts, text=msg)
         return
@@ -425,7 +393,7 @@ def handle_dm(event, client):
     text = (event.get("text") or "").strip()
     if not text:
         client.chat_postMessage(channel=dm_channel, thread_ts=event["ts"],
-                                text="prox5 submissions need at least _some_ some text. Attachments can't be submitted alone.")
+                                text="prox5 submissions need at least _some_ some text. Attachments cannot be submitted yet.")
         return
     if len(text) > MAX_LEN:
         client.chat_postMessage(channel=dm_channel, thread_ts=event["ts"],
@@ -452,7 +420,7 @@ def handle_dm(event, client):
                 "text": {
                     "type": "mrkdwn",
                     "text": "Submit the message above? "
-                            "Moderators review it before it's posted, but they don't know who you are, unless you have been reported for anti-CoC material." + note,
+                            "Moderaters will review your prox5 *confessions* submission. Moderators do not see your Slack ID unless if you have been reported. When you are reported, you will rejected, however, being rejected does not necessarily mean reported." + note,
                 },
             },
             {
@@ -480,9 +448,9 @@ def replace_prompt(client, body, text):
 
 _STAGE_MESSAGES = (
     ":incoming_envelope: Sent off to review! In the meantime, drink some tea?",
-    ":incoming_envelope: Off it goes! Maybe stretch your legs while the mods take a look?",
-    ":incoming_envelope: Sent to the mods. Go pet a dog or something.",
-    ":incoming_envelope: In the queue! Breathe. You did it.",
+    ":incoming_envelope: Off it goes! Maybe stretch your legs while (I) take a look?",
+    ":incoming_envelope: It's lights out and away we go!",
+    ":incoming_envelope: Yaysies, it went off without a hitch.",
 )
 
 
@@ -591,7 +559,7 @@ def reject_modal(cid: int, report: bool, channel: str, ts: str):
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": ":warning: This reveals the author's Slack ID in the review "
-                                                "thread so a moderator can file a report in Shroud."},
+                                                "thread so a moderator can file a report to Shroud."},
         })
     blocks.append({
         "type": "input",
