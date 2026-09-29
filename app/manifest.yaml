@@ -9,6 +9,13 @@ features:
   bot_user:
     display_name: prox5
     always_online: true
+  slash_commands:
+    - command: /sprox
+      description: Subscribe to updates on your most recent prox5 submission
+      should_escape: false
+    - command: /uprox
+      description: Unsubscribe from updates on your most recent prox5 submission
+      should_escape: false
 oauth_config:
   scopes:
     bot:
@@ -22,6 +29,7 @@ oauth_config:
       - users:read
       - files:read
       - files:write
+      - commands
 settings:
   event_subscriptions:
     bot_events:
