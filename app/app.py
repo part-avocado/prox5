@@ -1,4 +1,4 @@
-VERSION = "1.1.2"
+VERSION = "1.2.0"
 
 import hashlib
 import hmac
@@ -451,10 +451,7 @@ def handle_dm(event, client):
                 "text": {
                     "type": "mrkdwn",
                     "text": "Submit the message above? "
-                            "Moderators will review your prox5 *confessions* submission. Moderators cannot see "
-                            "your Slack ID — there is no button or feature in Slack that reveals it. "
-                            f"You can permanently delete this at any time by sending `{_DELETE_TRIGGER}` "
-                            "in this thread." + note,
+                            "Moderaters will review your prox5 *confessions* submission. Moderators cannot see your Slack ID, nor associate your message with your Slack ID in any way." + note,
                 },
             },
             {
@@ -528,7 +525,7 @@ def review_blocks(cid: int, number: int, text: str):
             "elements": [
                 {"type": "button", "action_id": "approve", "value": str(cid), "style": "primary",
                  "text": {"type": "plain_text", "text": "Approve"}},
-                {"type": "button", "action_id": "reject", "value": str(cid),
+                {"type": "button", "action_id": "reject", "value": str(cid), "style": "danger",
                  "text": {"type": "plain_text", "text": "Reject"}},
             ],
         },
@@ -591,7 +588,7 @@ def delete_confession(c, client):
         try:
             first_block = review_blocks(cid, c["number"], dec(c["text_enc"]))[0]
             close_review(client, REVIEW, c["review_ts"], first_block,
-                         ":wastebasket: Withdrawn by the author before review completed.")
+                         ":wastebasket: Gone!")
         except SlackApiError as e:
             if e.response["error"] != "message_not_found":
                 raise
@@ -616,13 +613,12 @@ def reject_modal(cid: int, channel: str, ts: str):
         "blocks": [{
             "type": "input",
             "block_id": "reason_block",
-            "optional": True,
-            "label": {"type": "plain_text", "text": "Reason (optional)"},
+            "label": {"type": "plain_text", "text": "Reason shown to submitter"},
             "element": {
                 "type": "plain_text_input",
                 "action_id": "reason",
                 "multiline": True,
-                "placeholder": {"type": "plain_text", "text": "Shown to the author. Leave blank to send no reason."},
+                "placeholder": {"type": "plain_text", "text": "https://hack.club/coc"},
             },
         }],
     }
