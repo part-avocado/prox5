@@ -46,3 +46,55 @@ docker run -d --name prox5 \
 ```
 
 The `-v prox5-data:/app/data` volume is where the sqlite database (prox5 submission history, moderation state, and the submission counter) lives. Without it, that data — including the submission count — resets every time the container is recreated.
+
+## Identity protection
+
+A submitter's Slack ID is stored encrypted (`CONFESSIONS_KEY`, a Fernet key)
+in the `user_enc` column. **The bot itself never decrypts it, for any
+reason.** There is no button, slash command, admin role, or "report"
+feature that reveals a submitter's identity — moderators only ever see
+Approve and Reject. That column is write-only from the bot's perspective.
+Nobody can flag or report a submission to have it deanonymized; that path
+does not exist.
+
+The only way to recover an identity is `app/deanon.py`, a separate CLI
+tool with no Slack or network surface at all, and it only works on a
+submission that was already **approved and posted** to the channel — it
+refuses to run against anything still a draft, pending review, or
+rejected, since there's nothing to act on and no one to answer to in
+those cases. Run it directly on the host/container with shell access:
+
+```
+docker exec -it prox5 python3 deanon.py <confession-id>
+```
+
+It's intentionally slow and manual, not a shortcut:
+
+- It takes an internal database `id`, not a public post number — you have
+  to open the sqlite DB yourself (`sqlite3 data/confessions.db`) to find it.
+- It refuses anything not already `approved`.
+- It prints a fresh one-time code you must retype exactly; the code changes
+  every run, so it can't be scripted or replayed from shell history.
+- It requires typing a non-empty reason for the lookup.
+- It then makes you sit through a mandatory countdown (`DEANON_DELAY_SECONDS`,
+  default `20`) before showing the result.
+- Every attempt — success, wrong status, wrong code, empty reason, or abort —
+  is appended to `DEANON_LOG_PATH` (default `data/deanon.log`), created
+  `0600` in a `0700` directory. That file is the only place a Slack ID is
+  ever written in the clear, and reading it requires shell/root access to
+  the host.
+
+This assumes whoever has shell/root access to the host is already trusted
+and secured — the friction here exists to stop casual or in-Slack
+deanonymization, not to defend against a compromised host.
+
+## Self-service deletion
+
+A submitter can permanently delete their own submission at any time —
+draft, pending, rejected, or already posted — by replying in their DM
+thread with `!DELETEORIGINAL`, then confirming with a second message that
+reads exactly `delete original message` (the confirmation expires after 5
+minutes if not sent). This removes the public post from the channel (if
+any), closes out an in-progress review, and deletes the database row
+entirely, including the encrypted identity — nothing recoverable is left
+behind, and once it's gone `deanon.py` has nothing left to act on either.

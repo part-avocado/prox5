@@ -10,7 +10,6 @@ import sqlite3
 import threading
 import time
 import urllib.request
-from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet
 from dotenv import load_dotenv
@@ -60,6 +59,13 @@ db = sqlite3.connect(DB_PATH, check_same_thread=False)
 db.row_factory = sqlite3.Row
 _lock = threading.Lock()
 
+# NOTE: this bot has no feature, button, command, or code path that decrypts
+# or displays a submitter's Slack ID (`user_enc`), to anyone, ever — not to
+# moderators, not to admins. That column is write-only from here. The only
+# way to recover an author's identity is deanon.py, a separate CLI tool
+# that must be run directly on the host with shell access. See its
+# docstring and README.md for why that's intentional.
+
 db.executescript(
     """
     CREATE TABLE IF NOT EXISTS confessions (
@@ -72,7 +78,8 @@ db.executescript(
         status          TEXT NOT NULL DEFAULT 'draft',  -- draft|pending|approved|rejected
         number          INTEGER,           -- assigned once staged for review; reused as the public post number if approved
         pub_ts          TEXT,              -- the post in #confessions (thread root)
-        subscribed      INTEGER NOT NULL DEFAULT 1  -- 0 if the OP opted out of channel replies via `unsub`
+        subscribed      INTEGER NOT NULL DEFAULT 1, -- 0 if the OP opted out of channel replies via `unsub`
+        review_ts       TEXT               -- the review-channel post, so a withdrawal can update/close it
     );
     CREATE INDEX IF NOT EXISTS idx_conf_dm  ON confessions(dm_index, dm_ts);
     CREATE INDEX IF NOT EXISTS idx_conf_pub ON confessions(pub_ts);
@@ -92,6 +99,9 @@ db.commit()
 _conf_cols = [r[1] for r in db.execute("PRAGMA table_info(confessions)").fetchall()]
 if "subscribed" not in _conf_cols:
     db.execute("ALTER TABLE confessions ADD COLUMN subscribed INTEGER NOT NULL DEFAULT 1")
+    db.commit()
+if "review_ts" not in _conf_cols:
+    db.execute("ALTER TABLE confessions ADD COLUMN review_ts TEXT")
     db.commit()
 
 
@@ -193,10 +203,6 @@ def profile(user_id: str):
 
 def quote(text: str) -> str:
     return "\n".join(f"> {line}" for line in text.splitlines())
-
-
-def sent_time(ts: str) -> str:
-    return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def relay_files(msg, channel, thread_ts, client):
@@ -326,6 +332,11 @@ def handle_pub(event, client):
 _UNSUB_WORDS = ("unsub", "unsubscribe")
 _SUB_WORDS = ("sub", "subscribe")
 
+_DELETE_TRIGGER = "!deleteoriginal"
+_DELETE_CONFIRM = "delete original message"
+_DELETE_CONFIRM_WINDOW = 300  # seconds to confirm after triggering
+_pending_deletes = {}  # (dm_index, dm_ts) -> expiry epoch
+
 
 def handle_subscription_command(client, dm_channel, thread_ts, c, want: bool):
     if bool(c["subscribed"]) == want:
@@ -380,6 +391,20 @@ def handle_dm(event, client):
         cmd = (event.get("text") or "").strip().lower().lstrip("/")
         if not c:
             msg = "Hmm... I couldn't match this thread. Send a new message (not in a thread) to start one!"
+        elif cmd == _DELETE_TRIGGER:
+            _pending_deletes[(c["dm_index"], c["dm_ts"])] = time.time() + _DELETE_CONFIRM_WINDOW
+            msg = (
+                ":warning: This will *permanently delete* your prox5 submission"
+                + (" and remove it from the channel" if c["pub_ts"] else "")
+                + f". This cannot be undone.\nTo confirm, reply with exactly: `{_DELETE_CONFIRM}`"
+            )
+        elif cmd == _DELETE_CONFIRM:
+            expiry = _pending_deletes.pop((c["dm_index"], c["dm_ts"]), 0)
+            if time.time() > expiry:
+                msg = f"No pending deletion to confirm. Send `{_DELETE_TRIGGER}` first."
+            else:
+                delete_confession(c, client)
+                msg = ":wastebasket: Done — your prox5 submission has been permanently deleted."
         elif cmd in _UNSUB_WORDS or cmd in _SUB_WORDS:
             handle_subscription_command(client, dm_channel, thread_ts, c, cmd in _SUB_WORDS)
             return
@@ -426,7 +451,10 @@ def handle_dm(event, client):
                 "text": {
                     "type": "mrkdwn",
                     "text": "Submit the message above? "
-                            "Moderaters will review your prox5 *confessions* submission. Moderators do not see your Slack ID unless if you have been reported. When you are reported, you will rejected, however, being rejected does not necessarily mean reported." + note,
+                            "Moderators will review your prox5 *confessions* submission. Moderators cannot see "
+                            "your Slack ID — there is no button or feature in Slack that reveals it. "
+                            f"You can permanently delete this at any time by sending `{_DELETE_TRIGGER}` "
+                            "in this thread." + note,
                 },
             },
             {
@@ -473,7 +501,10 @@ def on_stage(ack, body, client):
         db.commit()
     c = conf(cid)  # re-read in case the draft was edited, and to pick up the number
     text = dec(c["text_enc"])
-    client.chat_postMessage(channel=REVIEW, text="New prox5 submission to review", blocks=review_blocks(cid, c["number"], text))
+    review_msg = client.chat_postMessage(
+        channel=REVIEW, text="New prox5 submission to review", blocks=review_blocks(cid, c["number"], text)
+    )
+    run("UPDATE confessions SET review_ts=? WHERE id=?", (review_msg["ts"], cid))
     replace_prompt(client, body, random.choice(_STAGE_MESSAGES))
 
 
@@ -499,15 +530,6 @@ def review_blocks(cid: int, number: int, text: str):
                  "text": {"type": "plain_text", "text": "Approve"}},
                 {"type": "button", "action_id": "reject", "value": str(cid),
                  "text": {"type": "plain_text", "text": "Reject"}},
-                {"type": "button", "action_id": "reject_report", "value": str(cid), "style": "danger",
-                 "text": {"type": "plain_text", "text": "Reject & Report"},
-                 "confirm": {
-                     "title": {"type": "plain_text", "text": "Reject and report?"},
-                     "text": {"type": "plain_text",
-                              "text": "This reveals the author's Slack ID to you privately so you can file a report."},
-                     "confirm": {"type": "plain_text", "text": "Report"},
-                     "deny": {"type": "plain_text", "text": "Cancel"},
-                 }},
             ],
         },
     ]
@@ -548,7 +570,8 @@ def on_approve(ack, body, client):
         thread_ts=c["dm_ts"],
         text=f":tada: Approved and posted as *[ {number} ]*! Replies from the channel will appear "
              f"in this thread, and anything you send here is posted there as {OP_NAME}. "
-             f"Send `unsub` any time to stop channel replies from appearing here.",
+             f"Send `unsub` any time to stop channel replies from appearing here, or "
+             f"`{_DELETE_TRIGGER}` to permanently delete this submission from the channel.",
     )
 
 
@@ -559,34 +582,49 @@ def notify_rejected(client, c, reason: str = ""):
     client.chat_postMessage(channel=dec(c["dm_channel_enc"]), thread_ts=c["dm_ts"], text=text)
 
 
-def reject_modal(cid: int, report: bool, channel: str, ts: str):
-    blocks = []
-    if report:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": ":warning: This reveals the author's Slack ID in the review "
-                                                "thread so a moderator can file a report to Shroud."},
-        })
-    blocks.append({
-        "type": "input",
-        "block_id": "reason_block",
-        "optional": True,
-        "label": {"type": "plain_text", "text": "Reason (optional)"},
-        "element": {
-            "type": "plain_text_input",
-            "action_id": "reason",
-            "multiline": True,
-            "placeholder": {"type": "plain_text", "text": "Shown to the author. Leave blank to send no reason."},
-        },
-    })
+def delete_confession(c, client):
+    """Permanently erases a confession at the author's own request. Removes
+    the public post (if any), closes out a still-open review post (if any),
+    and drops the DB row entirely — nothing recoverable is left behind."""
+    cid = c["id"]
+    if c["status"] == "pending" and c["review_ts"]:
+        try:
+            first_block = review_blocks(cid, c["number"], dec(c["text_enc"]))[0]
+            close_review(client, REVIEW, c["review_ts"], first_block,
+                         ":wastebasket: Withdrawn by the author before review completed.")
+        except SlackApiError as e:
+            if e.response["error"] != "message_not_found":
+                raise
+    if c["pub_ts"]:
+        try:
+            client.chat_delete(channel=CONFESSIONS, ts=c["pub_ts"])
+        except SlackApiError as e:
+            if e.response["error"] != "message_not_found":
+                raise
+    run("DELETE FROM relays WHERE confession_id=?", (cid,))
+    run("DELETE FROM confessions WHERE id=?", (cid,))
+
+
+def reject_modal(cid: int, channel: str, ts: str):
     return {
         "type": "modal",
         "callback_id": "reject_submit",
-        "private_metadata": json.dumps({"cid": cid, "report": report, "channel": channel, "ts": ts}),
-        "title": {"type": "plain_text", "text": "Reject & report" if report else "Reject prox5 submission"},
-        "submit": {"type": "plain_text", "text": "Report" if report else "Reject"},
+        "private_metadata": json.dumps({"cid": cid, "channel": channel, "ts": ts}),
+        "title": {"type": "plain_text", "text": "Reject prox5 submission"},
+        "submit": {"type": "plain_text", "text": "Reject"},
         "close": {"type": "plain_text", "text": "Cancel"},
-        "blocks": blocks,
+        "blocks": [{
+            "type": "input",
+            "block_id": "reason_block",
+            "optional": True,
+            "label": {"type": "plain_text", "text": "Reason (optional)"},
+            "element": {
+                "type": "plain_text_input",
+                "action_id": "reason",
+                "multiline": True,
+                "placeholder": {"type": "plain_text", "text": "Shown to the author. Leave blank to send no reason."},
+            },
+        }],
     }
 
 
@@ -596,17 +634,7 @@ def on_reject(ack, body, client):
     cid = int(body["actions"][0]["value"])
     client.views_open(
         trigger_id=body["trigger_id"],
-        view=reject_modal(cid, False, body["channel"]["id"], body["message"]["ts"]),
-    )
-
-
-@app.action("reject_report")
-def on_reject_report(ack, body, client):
-    ack()
-    cid = int(body["actions"][0]["value"])
-    client.views_open(
-        trigger_id=body["trigger_id"],
-        view=reject_modal(cid, True, body["channel"]["id"], body["message"]["ts"]),
+        view=reject_modal(cid, body["channel"]["id"], body["message"]["ts"]),
     )
 
 
@@ -614,38 +642,15 @@ def on_reject_report(ack, body, client):
 def on_reject_submit(ack, body, client):
     ack()
     meta = json.loads(body["view"]["private_metadata"])
-    cid, report, channel, ts = meta["cid"], meta["report"], meta["channel"], meta["ts"]
+    cid, channel, ts = meta["cid"], meta["channel"], meta["ts"]
     reason = (body["view"]["state"]["values"]["reason_block"]["reason"].get("value") or "").strip()
+    mod = body["user"]["id"]
 
     if not transition(cid, "pending", "rejected"):
         return
     c = conf(cid)
-    mod = body["user"]["id"]
     first_block = review_blocks(cid, c["number"], dec(c["text_enc"]))[0]
-
-    if report:
-        author = dec(c["user_enc"])
-        content = dec(c["text_enc"]).replace("```", "'''")
-        report_text = (
-            f"prox5 submission info\n"
-            f"Author Slack ID: {author}\n"
-            f"Time sent: {sent_time(c['dm_ts'])}\n"
-            + (f"Reason: {reason}\n" if reason else "")
-            + f"Message:\n{content}"
-        )
-        client.chat_postMessage(
-            channel=channel,
-            thread_ts=ts,
-            text=f":rotating_light: Report for *[ {c['number']} ]*. Author: <@{author}>. Copy to Shroud:",
-            blocks=[
-                {"type": "section", "text": {"type": "mrkdwn",
-                 "text": f":rotating_light: *Report for [ {c['number']} ].* Author: <@{author}>\nCopy to Shroud:"}},
-                {"type": "section", "text": {"type": "mrkdwn", "text": f"```{report_text}```"}},
-            ],
-        )
-        outcome = f":rotating_light: Rejected & reported by <@{mod}>. Report details posted in thread."
-    else:
-        outcome = f":x: Rejected by <@{mod}>"
+    outcome = f":x: Rejected by <@{mod}>"
 
     close_review(client, channel, ts, first_block, outcome, reason)
     notify_rejected(client, c, reason)
