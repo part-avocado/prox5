@@ -30,7 +30,13 @@ OP_NAME = "prox5"
 OP_ICON = ":anonymous_lachlan:"
 
 app = App(token=BOT_TOKEN)
-BOT_USER_ID = app.client.auth_test()["user_id"]
+_auth = app.client.auth_test()
+BOT_USER_ID = _auth["user_id"]
+print(
+    f"[prox5] v{VERSION} connected to Slack as {_auth.get('user')} "
+    f"({BOT_USER_ID}) in team {_auth.get('team')} ({_auth.get('team_id')})",
+    flush=True,
+)
 
 _KEY = os.environ["CONFESSIONS_KEY"].encode()
 _fernet = Fernet(_KEY)
@@ -688,4 +694,5 @@ app.event("reaction_removed")(mirror_reaction)
 
 
 if __name__ == "__main__":
+    print(f"[prox5] v{VERSION} opening Socket Mode connection...", flush=True)
     SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()
